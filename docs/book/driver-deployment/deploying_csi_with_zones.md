@@ -15,7 +15,7 @@ Depending on your vSphere storage environment, you can use different deployment 
 
 In the following example, the vCenter Server environment includes three clusters with node VMs located on all three clusters.
 
-![REGION_AND_ZONES](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/REGION_AND_ZONES.png)
+![REGION_AND_ZONES](https://github.com/divyenpatel/vsphere-csi-driver/raw/volume-topology-doc/docs/images/REGION_AND_ZONES.png)
 
 The sample workflow creates zones per cluster and per data center.
 
