@@ -1,7 +1,8 @@
 <!-- markdownlint-disable MD033 -->
-# vSphere CSI Driver - Setup Topology (Zoning)
+<!-- markdownlint-disable MD024 -->
+# vSphere CSI Driver - Deployment with Topology
 
-- [Set Up Zones in the vSphere CNS Environment](#set_up_zones_in_vspehre)
+- [Set Up Zones in the vSphere CNS Environment](#set_up_zones_in_vsphere)
 - [Enable Zones for the vSphere CPI and CSI Driver](#enable_zones_for_vsphere_cpi_and_csi)
 - [Deploy Workloads Using Zones](#deploy_workload_using_zones)
 
@@ -9,7 +10,7 @@ When you deploy CPI and CSI in a vSphere environment that includes multiple data
 
 Zoning enables orchestration systems, like Kubernetes, to integrate with vSphere storage resources that are not equally available to all nodes. As a result, the orchestration system can make intelligent decisions when dynamically provisioning volumes, and avoid situations such as those where a pod cannot start because the storage resource it needs is not accessible.
 
-## Set Up Zones in the vSphere CNS Environment <a id="set_up_zones_in_vspehre"></a>
+## Set Up Zones in the vSphere CNS Environment <a id="set_up_zones_in_vsphere"></a>
 
 Depending on your vSphere storage environment, you can use different deployment scenarios for zones. For example, you can have zones per host cluster, per data center, or have a combination of both.
 
@@ -19,14 +20,14 @@ In the following example, the vCenter Server environment includes three clusters
 
 The sample workflow creates zones per cluster and per data center.
 
-Procedure
+### Procedure
 
 - Create Zones Using vSphere Tags
   - You can use vSphere tags to label zones in your vSphere environment.
 - Enable Zones for the CCM and CSI Driver
   - Install the CCM and the CSI driver using the zone and region entries.
   
-### Create Zones Using vSphere Tags
+#### Create Zones Using vSphere Tags
 
 You can use vSphere tags to label zones in your vSphere environment.
 
@@ -38,7 +39,7 @@ Make sure that you have appropriate tagging privileges that control your ability
 
 **Note:** Ancestors of node VMs, such as host, cluster, and data center, must have the ReadOnly role set for the vSphere user configured to use the CSI driver and CCM. This is required to allow reading tags and categories to prepare nodes' topology.
 
-#### Procedure
+##### Procedure
 
 1. In the vSphere Client, create two tag categories, k8s-zone and k8s-region.
 
@@ -98,11 +99,11 @@ Make sure that you have appropriate tagging privileges that control your ability
     </tbody>
     </table>
 
-## Enable Zones for the vSphere CPI and CSI Driver <a id="enable_zones_for_vsphere_cpi_and_csi"></a>
+### Enable Zones for the vSphere CPI and CSI Driver <a id="enable_zones_for_vsphere_cpi_and_csi"></a>
 
 Install the vSphere CPI and the CSI driver using the zone and region entries.
 
-Procedure
+#### Procedure
 
 1. Install the vSphere CPI.
 
@@ -174,13 +175,13 @@ Procedure
    k8s-node5 map[drivers:[map[name:csi.vsphere.vmware.com nodeID:
    ```
 
-## Deploy Workloads Using Zones <a id="deploy_workload_using_zones"></a>
+### Deploy Workloads Using Zones <a id="deploy_workload_using_zones"></a>
 
 With zones, you can deploy a Kubernetes workload to a specific region or zone.
 
 Use the sample workflow to provision and verify your workloads.
 
-Procedure
+#### Procedure
 
 1. Create a StorageClass that defines zone and region mapping.
 
