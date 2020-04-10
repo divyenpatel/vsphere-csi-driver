@@ -33,7 +33,7 @@ You can use vSphere tags to label zones in your vSphere environment.
 
 The task assumes that your vCenter Server environment includes three clusters, cluster1, cluster2, and cluster3, with the node VMs on all three clusters. In the task, you create two tag categories, k8s-zone and k8s-region. You tag the clusters as three zones, zone-a, zone-b, and zone-c, and mark the data center as a region, region-1.
 
-#### Prerequisites
+##### Prerequisites
 
 Make sure that you have appropriate tagging privileges that control your ability to work with tags. See vSphere Tagging Privileges in the vSphere Security documentation.
 
@@ -99,11 +99,11 @@ Make sure that you have appropriate tagging privileges that control your ability
     </tbody>
     </table>
 
-### Enable Zones for the vSphere CPI and CSI Driver <a id="enable_zones_for_vsphere_cpi_and_csi"></a>
+#### Enable Zones for the vSphere CPI and CSI Driver <a id="enable_zones_for_vsphere_cpi_and_csi"></a>
 
 Install the vSphere CPI and the CSI driver using the zone and region entries.
 
-#### Procedure
+##### Procedure
 
 1. Install the vSphere CPI.
 
@@ -175,13 +175,13 @@ Install the vSphere CPI and the CSI driver using the zone and region entries.
    k8s-node5 map[drivers:[map[name:csi.vsphere.vmware.com nodeID:
    ```
 
-### Deploy Workloads Using Zones <a id="deploy_workload_using_zones"></a>
+#### Deploy Workloads Using Zones <a id="deploy_workload_using_zones"></a>
 
 With zones, you can deploy a Kubernetes workload to a specific region or zone.
 
 Use the sample workflow to provision and verify your workloads.
 
-#### Procedure
+##### Procedure
 
 1. Create a StorageClass that defines zone and region mapping.
 
