@@ -121,7 +121,7 @@ Use the sample workflow to provision and verify your workloads.
     spec:
       containers:
       - name: test-container
-        image: gcr.io/google_containers/busybox:1.24
+        image: k8s.gcr.io/busybox:1.24
         command: ["/bin/sh", "-c", "echo
      'hello' > /mnt/volume1/index.html  && chmod o+rX /mnt
     /mnt/volume1/index.html && while true ; do sleep 2 ; done"]
@@ -232,7 +232,7 @@ For information on how this option changes the result, see the table at [https:/
                   topologyKey: failure-domain.beta.kubernetes.io/zone
           containers:
             - name: nginx
-              image: gcr.io/google_containers/nginx-slim:0.8
+              image: k8s.gcr.io/nginx-slim:0.8
               ports:
                 - containerPort: 80
                   name: web

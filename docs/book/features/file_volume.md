@@ -87,7 +87,7 @@ metadata:
 spec:
   containers:
     - name: test-container
-      image: gcr.io/google_containers/busybox:1.24
+      image: k8s.gcr.io/busybox:1.24
       command: ["/bin/sh", "-c", "echo 'Hello! This is Pod1' >> /mnt/volume1/index.html && while true ; do sleep 2 ; done"]
       volumeMounts:
         - name: test-volume
@@ -113,7 +113,7 @@ metadata:
 spec:
   containers:
     - name: test-container
-      image: gcr.io/google_containers/busybox:1.24
+      image: k8s.gcr.io/busybox:1.24
       command: ["/bin/sh", "-c", "while true ; do sleep 2 ; done"]
       volumeMounts:
         - name: test-volume
