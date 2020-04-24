@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vmware/govmomi/cns"
@@ -446,6 +447,16 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	if err != nil {
 		return nil, err
 	}
+
+	if strings.Contains(req.VolumeId, ".vmdk") {
+		log.Infof("Registering in-tree volume: %q", req.VolumeId)
+		req.VolumeId, err = common.RegisterInTreeVolume(ctx, cnstypes.CnsClusterFlavorVanilla, c.manager, req.VolumeId)
+		if err != nil {
+			msg := fmt.Sprintf("failed to register in-tree volume: %q, err: %+v", req.VolumeId, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
+	}
 	err = common.DeleteVolumeUtil(ctx, c.manager, req.VolumeId, true)
 	if err != nil {
 		msg := fmt.Sprintf("failed to delete volume: %q. Error: %+v", req.VolumeId, err)
@@ -475,7 +486,6 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 		log.Error(msg)
 		return nil, status.Errorf(codes.Internal, msg)
 	}
-
 	log.Debugf("Found VirtualMachine for node:%q.", req.NodeId)
 	publishInfo := make(map[string]string)
 	// Check whether its a block or file volume
@@ -514,6 +524,16 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 		}
 	} else {
 		// Block Volume
+		if strings.Contains(req.VolumeId, ".vmdk") {
+			log.Infof("Registering in-tree volume: %q", req.VolumeId)
+			req.VolumeId, err = common.RegisterInTreeVolume(ctx, cnstypes.CnsClusterFlavorVanilla, c.manager, req.VolumeId)
+			if err != nil {
+				msg := fmt.Sprintf("failed to register in-tree volume: %q, err: %+v", req.VolumeId, err)
+				log.Error(msg)
+				return nil, status.Errorf(codes.Internal, msg)
+			}
+			publishInfo["migratedvolumehandle"] = req.VolumeId
+		}
 		diskUUID, err := common.AttachVolumeUtil(ctx, c.manager, node, req.VolumeId)
 		if err != nil {
 			msg := fmt.Sprintf("failed to attach disk: %+q with node: %q err %+v", req.VolumeId, req.NodeId, err)
@@ -546,6 +566,15 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 	if deletedVolumes.Contains(req.VolumeId) {
 		log.Info("Skipping ControllerUnpublish for deleted volume ", req.VolumeId)
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
+	if strings.Contains(req.VolumeId, ".vmdk") {
+		log.Infof("Registering in-tree volume: %q", req.VolumeId)
+		req.VolumeId, err = common.RegisterInTreeVolume(ctx, cnstypes.CnsClusterFlavorVanilla, c.manager, req.VolumeId)
+		if err != nil {
+			msg := fmt.Sprintf("failed to register in-tree volume: %q, err: %+v", req.VolumeId, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
 	}
 
 	queryFilter := cnstypes.CnsQueryFilter{

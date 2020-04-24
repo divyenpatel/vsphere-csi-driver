@@ -261,6 +261,7 @@ func (s *service) NodeUnstageVolume(
 	}
 
 	volID := req.GetVolumeId()
+	log.Infof("volID: %q", volID)
 	dirExists, err := verifyTargetDir(ctx, stagingTarget, false)
 	if err != nil {
 		return nil, err
@@ -354,6 +355,12 @@ func (s *service) NodePublishVolume(
 		target: req.GetTargetPath(),
 		ro:     req.GetReadonly(),
 	}
+
+	if migratedvolumehandle, ok := req.PublishContext["migratedvolumehandle"]; ok {
+		log.Infof("Observed migrated volume. Volume ID is %q for in-tree vSphere volume: %q", migratedvolumehandle, req.GetVolumeId())
+		params.volID = migratedvolumehandle
+	}
+
 	// TODO: Verify if volume exists and return a NotFound error in negative scenario
 
 	params.stagingTarget = req.GetStagingTargetPath()

@@ -32,7 +32,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: csi-attacher
-          image: quay.io/k8scsi/csi-attacher:v2.0.0
+          image: docker.io/divyen/csi-translation-external-attacher:latest
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -58,7 +58,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.0.0-rc.1
+          image: divyen/driver:csi-migration
           lifecycle:
             preStop:
               exec:
@@ -102,7 +102,7 @@ spec:
             - mountPath: /var/lib/csi/sockets/pluginproxy/
               name: socket-dir
         - name: vsphere-syncer
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.0.0-rc.1
+          image: divyen/syncer:csi-migration
           args:
             - "--leader-election"
           imagePullPolicy: "Always"
@@ -118,15 +118,14 @@ spec:
               name: vsphere-config-volume
               readOnly: true
         - name: csi-provisioner
-          image: quay.io/k8scsi/csi-provisioner:v1.4.0
+          image: divyen/csi-translation-external-provisioner:latest
           args:
             - "--v=4"
             - "--timeout=300s"
             - "--csi-address=$(ADDRESS)"
             - "--feature-gates=Topology=true"
             - "--strict-topology"
-            - "--enable-leader-election"
-            - "--leader-election-type=leases"
+            - "--leader-election"
           env:
             - name: ADDRESS
               value: /csi/csi.sock

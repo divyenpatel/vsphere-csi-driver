@@ -19,6 +19,9 @@ package common
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/davecgh/go-spew/spew"
 	cnstypes "github.com/vmware/govmomi/cns/types"
@@ -289,6 +292,62 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 		log.Errorf("failed to create file volume %q with error %+v", spec.Name, err)
 		return "", err
 	}
+	return volumeID.Id, nil
+}
+
+// RegisterInTreeVolume is the helper function to register in-tree vSphere volume to CNS
+func RegisterInTreeVolume(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, manager *Manager, intreeVolumePath string) (string, error) {
+	log := logger.GetLogger(ctx)
+	vc, err := GetVCenter(ctx, manager)
+	if err != nil {
+		log.Errorf("failed to get vCenter from Manager, err: %+v", err)
+		return "", err
+	}
+
+	// Get PV name from in-tree vsphere volume path
+	// intreeVolumePath Example: [vsanDatastore] d43a9f5e-0be3-b402-d09a-020001d2df71/kubernetes-dynamic-pvc-7ef3498e-aa64-4387-bd88-ba321d1c9066.vmdk
+	volumeName := strings.TrimPrefix(filepath.Base(intreeVolumePath), "kubernetes-dynamic-")
+	volumeName = strings.TrimRight(volumeName, ".vmdk")
+
+	re := regexp.MustCompile(`\[([^\[\]]*)\]`)
+	if !re.MatchString(intreeVolumePath) {
+		msg := fmt.Sprintf("failed to extract datastore name from in-tree volume path: %q", intreeVolumePath)
+		log.Errorf(msg)
+		return "", errors.New(msg)
+	}
+	datastoreName := re.FindAllString(intreeVolumePath, -1)[0]
+	vmdkPath := strings.Trim(intreeVolumePath, datastoreName)
+	vmdkPath = strings.TrimSpace(vmdkPath)
+	datastoreName = strings.Trim(datastoreName, "[")
+	datastoreName = strings.Trim(datastoreName, "]")
+
+	// Format:
+	// https://<vc_ip>/folder/<vm_vmdk_path>?dcPath=<datacenterName>&dsName=<datastoreName>
+	backingDiskURLPath := "https://" + vc.Config.Host + "/folder/" +
+		vmdkPath + "?dcPath=" + vc.Config.DatacenterPaths[0] + "&dsName=" + datastoreName
+
+	var containerClusterArray []cnstypes.CnsContainerCluster
+	containerCluster := vsphere.GetContainerCluster(manager.CnsConfig.Global.ClusterID, manager.CnsConfig.VirtualCenter[vc.Config.Host].User, clusterFlavor)
+	containerClusterArray = append(containerClusterArray, containerCluster)
+	createSpec := &cnstypes.CnsVolumeCreateSpec{
+		Name:       volumeName,
+		VolumeType: BlockVolumeType,
+		Metadata: cnstypes.CnsVolumeMetadata{
+			ContainerCluster:      containerCluster,
+			ContainerClusterArray: containerClusterArray,
+		},
+		BackingObjectDetails: &cnstypes.CnsBlockBackingDetails{
+			BackingDiskUrlPath: backingDiskURLPath,
+		},
+	}
+
+	log.Infof("vSphere CNS driver registering  in-tree volume %q with create spec %+v", intreeVolumePath, spew.Sdump(createSpec))
+	volumeID, err := manager.VolumeManager.CreateVolume(ctx, createSpec)
+	if err != nil {
+		log.Errorf("failed to register volume %q with error %+v", intreeVolumePath, err)
+		return "", err
+	}
+	log.Infof("successfully registered in-tree volume:%q as container volume with ID: %q", intreeVolumePath, volumeID.Id)
 	return volumeID.Id, nil
 }
 
