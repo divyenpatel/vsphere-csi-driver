@@ -320,8 +320,18 @@ func pvcUpdated(oldObj, newObj interface{}, metadataSyncer *metadataSyncInformer
 	}
 
 	// Verify if pv is vsphere csi volume
-	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != csitypes.Name {
-		log.Debugf("PVCUpdated: Not a Vsphere CSI Volume")
+	processVolume := false
+	volumeProvisioner, _ := pv.Annotations["pv.kubernetes.io/provisioned-by"]
+	migratedPluginName, _ := pv.Annotations["pv.kubernetes.io/migrated-to"]
+	if volumeProvisioner == "kubernetes.io/vsphere-volume" && migratedPluginName == pv.Spec.CSI.Driver {
+		processVolume = true
+	}
+	if volumeProvisioner == "csi.vsphere.vmware.com" && pv.Spec.VsphereVolume != nil {
+		// Volume Created by CSI Driver using in-tree Storage Class
+		processVolume = true
+	}
+	if pv.Spec.CSI == nil  || pv.Spec.CSI.Driver != csitypes.Name || processVolume {
+		log.Debugf("PVCUpdated: Not a Vsphere CSI Volume or migrated in-tree vSphere Volume")
 		return
 	}
 

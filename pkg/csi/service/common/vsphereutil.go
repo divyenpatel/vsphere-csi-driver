@@ -304,8 +304,6 @@ func RegisterInTreeVolume(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 		return "", err
 	}
 
-	// Get PV name from in-tree vsphere volume path
-	// intreeVolumePath Example: [vsanDatastore] d43a9f5e-0be3-b402-d09a-020001d2df71/kubernetes-dynamic-pvc-7ef3498e-aa64-4387-bd88-ba321d1c9066.vmdk
 	volumeName := strings.TrimPrefix(filepath.Base(intreeVolumePath), "kubernetes-dynamic-")
 	volumeName = strings.TrimRight(volumeName, ".vmdk")
 

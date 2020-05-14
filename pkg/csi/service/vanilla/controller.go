@@ -355,6 +355,12 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		}
 		resp.Volume.AccessibleTopology = append(resp.Volume.AccessibleTopology, volumeTopology)
 	}
+
+	if req.Parameters["requestvolumefilepath"] == "true" {
+		// TODO: Make a call to internal queryVolumeInfo API and obtain Volume Path
+		resp.Volume.VolumeContext["volumefilePath "] = "VMDK Path Obtained from VStorageObject using queryVolumeInfo API"
+	}
+
 	return resp, nil
 }
 
