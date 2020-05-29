@@ -22,10 +22,12 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vmware/govmomi/cns"
 
+	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -62,6 +64,7 @@ type controller struct {
 // TODO: Remove this when https://github.com/kubernetes/kubernetes/issues/84226 is fixed
 var deletedVolumes *timedmap.TimedMap
 
+var volumeMigrationService migration.VolumeMigrationService
 var (
 	// VSAN67u3ControllerServiceCapability represents the capability of controller service
 	// for VSAN67u3 release
@@ -186,6 +189,12 @@ func (c *controller) Init(config *config.Config) error {
 	}
 	// deletedVolumes timedmap with clean up interval of 1 minute to remove expired entries
 	deletedVolumes = timedmap.New(1 * time.Minute)
+	volumeMigrationService = migration.GetVolumeMigrationService(ctx)
+	err = volumeMigrationService.LoadAllVolumeInfo(ctx)
+	if err != nil {
+		log.Errorf("failed to load VolumeInfo: %q. err=%v", err)
+		return err
+	}
 	return nil
 }
 
@@ -446,6 +455,12 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	if err != nil {
 		return nil, err
 	}
+	if strings.Contains(req.VolumeId, ".vmdk") {
+		req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
+		if err != nil {
+			return nil, err
+		}
+	}
 	err = common.DeleteVolumeUtil(ctx, c.manager, req.VolumeId, true)
 	if err != nil {
 		msg := fmt.Sprintf("failed to delete volume: %q. Error: %+v", req.VolumeId, err)
@@ -514,6 +529,13 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 		}
 	} else {
 		// Block Volume
+		// in-tree volume support
+		if strings.Contains(req.VolumeId, ".vmdk") {
+			req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
+			if err != nil {
+				return nil, err
+			}
+		}
 		diskUUID, err := common.AttachVolumeUtil(ctx, c.manager, node, req.VolumeId)
 		if err != nil {
 			msg := fmt.Sprintf("failed to attach disk: %+q with node: %q err %+v", req.VolumeId, req.NodeId, err)
@@ -541,6 +563,13 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 		msg := fmt.Sprintf("Validation for UnpublishVolume Request: %+v has failed. Error: %v", *req, err)
 		log.Error(msg)
 		return nil, status.Errorf(codes.Internal, msg)
+	}
+	// in-tree volume support
+	if strings.Contains(req.VolumeId, ".vmdk") {
+		req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Check for the race condition where DeleteVolume is called before ControllerUnpublishVolume
 	if deletedVolumes.Contains(req.VolumeId) {

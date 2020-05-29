@@ -24,7 +24,9 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 )
 
 // validateVanillaCreateVolumeRequest is the helper function to validate
@@ -68,4 +70,24 @@ func validateVanillaControllerUnpublishVolumeRequest(ctx context.Context, req *c
 // Function returns error if validation fails otherwise returns nil.
 func validateVanillaControllerExpandVolumeRequest(ctx context.Context, req *csi.ControllerExpandVolumeRequest) error {
 	return common.ValidateControllerExpandVolumeRequest(ctx, req)
+}
+
+func registerVolume(ctx context.Context, volumePath string, c *controller) (string, error) {
+	log := logger.GetLogger(ctx)
+	var registeredVolumeId string
+	volumeMigrationSpec, err := volumeMigrationService.GetVolumeInfo(ctx, volumePath)
+	if err == migration.ErrVolumeNotRegistered {
+		log.Infof("Registering in-tree volume: %q", volumePath)
+		volumeMigration, err := volumeMigrationService.RegisterVolume(ctx, volumePath, c.manager)
+		if err != nil {
+			msg := fmt.Sprintf("failed to register in-tree volume: %+q err %+v", volumePath, err)
+			log.Error(msg)
+			return "", status.Errorf(codes.Internal, msg)
+		}
+		volumeMigrationService.SaveVolumeInfo(ctx, volumeMigration)
+		registeredVolumeId = volumeMigration.Spec.VolumeID
+	} else {
+		registeredVolumeId = volumeMigrationSpec.VolumeID
+	}
+	return registeredVolumeId, nil
 }

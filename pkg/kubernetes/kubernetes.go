@@ -24,13 +24,12 @@ import (
 	"os"
 	"strconv"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
-
 	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
@@ -39,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	apiutils "sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
+	vspherevolumemigrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration/v1alpha1"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
@@ -46,12 +46,11 @@ import (
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/syncer/cnsoperator/apis"
 )
 
-// NewClient creates a newk8s client based on a service account
-func NewClient(ctx context.Context) (clientset.Interface, error) {
+// GetKubeConfig helps retrieve Kubernetes Config
+func GetKubeConfig(ctx context.Context) (*restclient.Config, error) {
 	log := logger.GetLogger(ctx)
 	var config *restclient.Config
 	var err error
-
 	kubecfgPath := os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
 	if flag.Lookup("kubeconfig") != nil {
 		kubecfgPath = flag.Lookup("kubeconfig").Value.(flag.Getter).Get().(string)
@@ -70,6 +69,17 @@ func NewClient(ctx context.Context) (clientset.Interface, error) {
 			log.Errorf("InClusterConfig failed %v", err)
 			return nil, err
 		}
+	}
+	return config, nil
+}
+
+// NewClient creates a newk8s client based on a service account
+func NewClient(ctx context.Context) (clientset.Interface, error) {
+	log := logger.GetLogger(ctx)
+	config, err := GetKubeConfig(ctx)
+	if err != nil {
+		log.Errorf("Failed to get KubeConfig. err: %v", err)
+		return nil, err
 	}
 	return clientset.NewForConfig(config)
 }
@@ -126,12 +136,21 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 	switch groupName {
 	case vmoperatorv1alpha1.GroupName:
 		err = vmoperatorv1alpha1.AddToScheme(scheme)
+		if err != nil {
+			log.Error("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
 	case cnsoperatorv1alpha1.GroupName:
 		err = cnsoperatorv1alpha1.AddToScheme(scheme)
-	}
-	if err != nil {
-		log.Error("failed to add to scheme with err: %+v", err)
-		return nil, err
+		if err != nil {
+			log.Error("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+		err = vspherevolumemigrationv1alpha1.AddToScheme(scheme)
+		if err != nil {
+			log.Error("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
 	}
 	client, err := client.New(config, client.Options{
 		Scheme: scheme,
