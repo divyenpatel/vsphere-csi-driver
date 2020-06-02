@@ -189,10 +189,14 @@ func (c *controller) Init(config *config.Config) error {
 	}
 	// deletedVolumes timedmap with clean up interval of 1 minute to remove expired entries
 	deletedVolumes = timedmap.New(1 * time.Minute)
-	volumeMigrationService = migration.GetVolumeMigrationService(ctx)
+	volumeMigrationService, err = migration.GetVolumeMigrationService(ctx)
+	if err != nil {
+		log.Errorf("failed to get migration service. Err: +v", err)
+		return err
+	}
 	err = volumeMigrationService.LoadAllVolumeInfo(ctx)
 	if err != nil {
-		log.Errorf("failed to load VolumeInfo: %q. err=%v", err)
+		log.Errorf("failed to load migrated volume info from CRDs. Err: %v", err)
 		return err
 	}
 	return nil
