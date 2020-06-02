@@ -112,12 +112,8 @@ const (
 	// VsanDatastoreType is the string to identify datastore type as vsan.
 	VsanDatastoreType string = "vsan"
 
-	// AllowRoot decides Whether the root access should be allowed on a file volume
-	AllowRoot string = "allowroot"
-
-	// Permission to be set in the file volume
-	Permission string = "permission"
-
-	// IPs is Client IP address, IP range or IP subnet
-	IPs string = "ips"
+	// CSIMigrationParams holds all in-tree vSphere volume Parameters Key and values
+	// in the json encoded string
+	// TODO: Remove this const when CSI translation lib is available with this const
+	CSIMigrationParams = "csimigrationparams"
 )

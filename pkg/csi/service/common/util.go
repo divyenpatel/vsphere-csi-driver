@@ -23,6 +23,7 @@ import (
 
 	csictx "github.com/rexray/gocsi/context"
 	cnstypes "github.com/vmware/govmomi/cns/types"
+
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 	csitypes "sigs.k8s.io/vsphere-csi-driver/pkg/csi/types"
@@ -31,6 +32,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
+
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 )
 
@@ -207,6 +209,8 @@ func ParseStorageClassParams(ctx context.Context, params map[string]string) (*St
 			scParams.StoragePolicyName = value
 		} else if param == AttributeFsType {
 			log.Warnf("param 'fstype' is deprecated, please use 'csi.storage.k8s.io/fstype' instead")
+		} else if param == CSIMigrationParams {
+			log.Infof("vSphere CSI Driver supports StoragePolicyName, Datastore and fsType parameters supplied from legacy in-tree provisioner. All other parameters supplied in csimigrationparams will be dropped.")
 		} else {
 			return nil, fmt.Errorf("Invalid param: %q and value: %q", param, value)
 		}

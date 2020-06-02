@@ -37,6 +37,7 @@ import (
 	"github.com/zekroTJA/timedmap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/util/json"
 
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
@@ -267,6 +268,67 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		msg := fmt.Sprintf("Parsing storage class parameters failed with error: %+v", err)
 		log.Error(msg)
 		return nil, status.Errorf(codes.InvalidArgument, msg)
+	}
+
+	migrationParamJSON, migrationParamPresent := req.Parameters[common.CSIMigrationParams]
+	if migrationParamPresent {
+		// VSphereVolumeParameters struct helps encode in-tree legacy parameters in the JSON form and supply to CSI driver
+		// Driver can use this struct to decode JSON encoded string with supplied with csimigrationparam
+		// TODO: Remove this struct when CSI translation lib is released with this type
+		type VSphereVolumeParameters struct {
+			Datastore              string `json:"datastore"`
+			Diskformat             string `json:"diskformat"`
+			Hostfailurestotolerate string `json:"hostfailurestotolerate"`
+			Forceprovisioning      string `json:"forceprovisioning"`
+			Cachereservation       string `json:"cachereservation"`
+			Diskstripes            string `json:"diskstripes"`
+			Objectspacereservation string `json:"objectspacereservation"`
+			Iopslimit              string `json:"iopslimit"`
+		}
+		var legacyParameters VSphereVolumeParameters
+		err := json.Unmarshal([]byte(migrationParamJSON), &legacyParameters)
+		if err != nil {
+			msg := fmt.Sprintf("failed to unmarshal csimigrationparams. err: %v", err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
+		log.Debugf("successfully unmarshaled csimigrationparams: %v", legacyParameters)
+		datastoreName := strings.TrimSpace(legacyParameters.Datastore)
+		if len(datastoreName) != 0 {
+			log.Infof("Converting datastore name: %q to Datastore URL", datastoreName)
+			vcList := c.manager.VcenterManager.GetAllVirtualCenters()
+			dcList, err := vcList[0].GetDatacenters(ctx)
+			if err != nil {
+				msg := fmt.Sprintf("failed to get datacenter list. err: %+v", err)
+				log.Error(msg)
+				return nil, status.Errorf(codes.Internal, msg)
+			}
+			foundDatastoreURL := false
+			for _, dc := range dcList {
+				dsURLTodsInfoMap, err := dc.GetAllDatastores(ctx)
+				if err != nil {
+					msg := fmt.Sprintf("failed to get dsURLTodsInfoMap. err: %+v", err)
+					log.Error(msg)
+					return nil, status.Errorf(codes.Internal, msg)
+				}
+				for dsURL, dsInfo := range dsURLTodsInfoMap {
+					if dsInfo.Info.Name == datastoreName {
+						scParams.DatastoreURL = dsURL
+						log.Info("Found datastoreURL: %q for datastore name: %q", scParams.DatastoreURL, datastoreName)
+						foundDatastoreURL = true
+						break
+					}
+				}
+				if foundDatastoreURL {
+					break
+				}
+			}
+			if !foundDatastoreURL {
+				msg := fmt.Sprintf("failed to find datastoreURL for datastore name: %q", datastoreName)
+				log.Error(msg)
+				return nil, status.Errorf(codes.Internal, msg)
+			}
+		}
 	}
 	var createVolumeSpec = common.CreateVolumeSpec{
 		CapacityMB: volSizeMB,
