@@ -58,7 +58,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: divyen/driver:v2.0.0-rc.1-55-ga6f19c3d-dirty
+          image: divyen/driver:v2.0.0-rc.1-57-g765e2820-dirty
           lifecycle:
             preStop:
               exec:
@@ -102,7 +102,7 @@ spec:
             - mountPath: /var/lib/csi/sockets/pluginproxy/
               name: socket-dir
         - name: vsphere-syncer
-          image: divyen/syncer:v2.0.0-rc.1-55-ga6f19c3d-dirty
+          image: divyen/syncer:v2.0.0-rc.1-57-g765e2820-dirty
           args:
             - "--leader-election"
           imagePullPolicy: "Always"

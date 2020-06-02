@@ -116,4 +116,8 @@ const (
 	// in the json encoded string
 	// TODO: Remove this const when CSI translation lib is available with this const
 	CSIMigrationParams = "csimigrationparams"
+
+	// AttributeInitialVolumeFilepath represents the path of volume where volume is created
+	// TODO: Remove this const when CSI translation lib is available with this const
+	AttributeInitialVolumeFilepath = "initialvolumefilepath"
 )

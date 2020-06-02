@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/vmware/govmomi/cns"
+	vim25types "github.com/vmware/govmomi/vim25/types"
 
 	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
@@ -276,14 +277,14 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		// Driver can use this struct to decode JSON encoded string with supplied with csimigrationparam
 		// TODO: Remove this struct when CSI translation lib is released with this type
 		type VSphereVolumeParameters struct {
-			Datastore              string `json:"datastore"`
-			Diskformat             string `json:"diskformat"`
-			Hostfailurestotolerate string `json:"hostfailurestotolerate"`
-			Forceprovisioning      string `json:"forceprovisioning"`
-			Cachereservation       string `json:"cachereservation"`
-			Diskstripes            string `json:"diskstripes"`
-			Objectspacereservation string `json:"objectspacereservation"`
-			Iopslimit              string `json:"iopslimit"`
+			Datastore              string `json:"datastore,omitempty"`
+			Diskformat             string `json:"diskformat,omitempty"`
+			Hostfailurestotolerate string `json:"hostfailurestotolerate,omitempty"`
+			Forceprovisioning      string `json:"forceprovisioning,omitempty"`
+			Cachereservation       string `json:"cachereservation,omitempty"`
+			Diskstripes            string `json:"diskstripes,omitempty"`
+			Objectspacereservation string `json:"objectspacereservation,omitempty"`
+			Iopslimit              string `json:"iopslimit,omitempty"`
 		}
 		var legacyParameters VSphereVolumeParameters
 		err := json.Unmarshal([]byte(migrationParamJSON), &legacyParameters)
@@ -314,7 +315,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 				for dsURL, dsInfo := range dsURLTodsInfoMap {
 					if dsInfo.Info.Name == datastoreName {
 						scParams.DatastoreURL = dsURL
-						log.Info("Found datastoreURL: %q for datastore name: %q", scParams.DatastoreURL, datastoreName)
+						log.Infof("Found datastoreURL: %q for datastore name: %q", scParams.DatastoreURL, datastoreName)
 						foundDatastoreURL = true
 						break
 					}
@@ -391,6 +392,19 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	}
 	attributes := make(map[string]string)
 	attributes[common.AttributeDiskType] = common.DiskTypeBlockVolume
+	if migrationParamPresent {
+		// Return InitialVolumeFilepath in the response for TranslateCSIPVToInTree
+		volumeIds := []cnstypes.CnsVolumeId{{Id: volumeID}}
+		queryVolumeInfoResult, err := c.manager.VolumeManager.QueryVolumeInfo(ctx, volumeIds)
+		if err != nil {
+			log.Errorf("QueryVolumeInfo failed for volumeID: %s", volumeID)
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		cnsBlockVolumeInfo := interface{}(queryVolumeInfoResult.VolumeInfo).(*cnstypes.CnsBlockVolumeInfo)
+		fileBackingInfo := interface{}(cnsBlockVolumeInfo.VStorageObject.Config.Backing).(vim25types.BaseConfigInfoFileBackingInfo)
+		log.Infof("successfully retrieved volume path: %q for volume id: %q", fileBackingInfo.FilePath, volumeID)
+		attributes[common.AttributeInitialVolumeFilepath] = fileBackingInfo.FilePath
+	}
 
 	resp := &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
@@ -521,7 +535,9 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	if err != nil {
 		return nil, err
 	}
+	var volumePath string
 	if strings.Contains(req.VolumeId, ".vmdk") {
+		volumePath = req.VolumeId
 		req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
 		if err != nil {
 			return nil, err
@@ -532,6 +548,14 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 		msg := fmt.Sprintf("failed to delete volume: %q. Error: %+v", req.VolumeId, err)
 		log.Error(msg)
 		return nil, status.Errorf(codes.Internal, msg)
+	}
+	if volumePath != "" {
+		err = volumeMigrationService.DeleteVolumeInfo(ctx, volumePath)
+		if err != nil {
+			msg := fmt.Sprintf("failed to delete volumeInfo CR: %q for volumePath: %q. Error: %+v", volumePath, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
 	}
 	deletedVolumes.Set(req.VolumeId, true, 5*time.Minute)
 	return &csi.DeleteVolumeResponse{}, nil

@@ -58,6 +58,8 @@ type Manager interface {
 	UpdateVolumeMetadata(ctx context.Context, spec *cnstypes.CnsVolumeMetadataUpdateSpec) error
 	// QueryVolume returns volumes matching the given filter.
 	QueryVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter) (*cnstypes.CnsQueryResult, error)
+	// QueryVolumeInfo calls the CNS QueryVolumeInfo API and return a task, from which CnsQueryVolumeInfoResult is extracted
+	QueryVolumeInfo(ctx context.Context, volumeIDList []cnstypes.CnsVolumeId)  (*cnstypes.CnsQueryVolumeInfoResult, error)
 	// QueryAllVolume returns all volumes matching the given filter and selection.
 	QueryAllVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter, querySelection cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error)
 	// ExpandVolume expands a volume to a new size.
@@ -615,4 +617,53 @@ func (m *defaultManager) QueryAllVolume(ctx context.Context, queryFilter cnstype
 		return nil, err
 	}
 	return res, err
+}
+
+// QueryVolumeInfo calls the CNS QueryVolumeInfo API and return a task, from which CnsQueryVolumeInfoResult is extracted
+func (m *defaultManager) QueryVolumeInfo(ctx context.Context, volumeIDList []cnstypes.CnsVolumeId) (*cnstypes.CnsQueryVolumeInfoResult, error) {
+	log := logger.GetLogger(ctx)
+	err := validateManager(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	// Set up the VC connection
+	err = m.virtualCenter.ConnectCns(ctx)
+	if err != nil {
+		log.Errorf("ConnectCns failed with err: %+v", err)
+		return nil, err
+	}
+	//Call the CNS QueryVolumeInfo
+	queryVolumeInfoTask, err := m.virtualCenter.CnsClient.QueryVolumeInfo(ctx, volumeIDList)
+	if err != nil {
+		log.Errorf("CNS QueryAllVolume failed from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
+		return nil, err
+	}
+
+	// Get the taskInfo
+	taskInfo, err := cns.GetTaskInfo(ctx, queryVolumeInfoTask)
+	if err != nil || taskInfo == nil {
+		log.Errorf("failed to get taskInfo for QueryVolumeInfo task from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
+		return nil, err
+	}
+	log.Infof("QueryVolumeInfo: volumeIDList: %v, opId: %q", volumeIDList, taskInfo.ActivationId)
+	// Get the task results for the given task
+	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		log.Errorf("unable to find the task result for QueryVolumeInfo task from vCenter %q with taskID %s and taskResult %v",
+			m.virtualCenter.Config.Host, taskInfo.Task.Value, taskResult)
+		return nil, err
+	}
+	if taskResult == nil {
+		log.Errorf("taskResult is empty for DeleteVolume task: %q, opID: %q", taskInfo.Task.Value, taskInfo.ActivationId)
+		return nil, errors.New("taskResult is empty")
+	}
+	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
+	if volumeOperationRes.Fault != nil {
+		msg := fmt.Sprintf("failed to Query volumes: %v, fault: %q, opID: %q", volumeIDList, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
+		log.Error(msg)
+		return nil, errors.New(msg)
+	}
+	volumeInfoResult := interface{}(taskResult).(*cnstypes.CnsQueryVolumeInfoResult)
+	log.Infof("QueryVolumeInfo successfully returned volumeInfo %v for volumeIDList %v:, opId: %q", spew.Sdump(volumeInfoResult), volumeIDList, taskInfo.ActivationId)
+	return volumeInfoResult, nil
 }

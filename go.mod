@@ -37,7 +37,7 @@ require (
 	github.com/rexray/gocsi v1.2.1
 	github.com/thecodeteam/gofsutil v0.1.2 // indirect
 	github.com/vmware-tanzu/vm-operator-api v0.1.0
-	github.com/vmware/govmomi v0.22.2-0.20200529210305-bffcab669a44
+	github.com/vmware/govmomi v0.22.2-0.20200530130842-aa97c4d3353d
 	github.com/zekroTJA/timedmap v0.0.0-20191029102728-85f9d45635d7
 	go.uber.org/atomic v1.5.1 // indirect
 	go.uber.org/multierr v1.4.0 // indirect

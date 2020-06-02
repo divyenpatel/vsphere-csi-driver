@@ -42,7 +42,7 @@ spec:
         - name: registration-dir
           mountPath: /registration
       - name: vsphere-csi-node
-        image: divyen/driver:v2.0.0-rc.1-55-ga6f19c3d-dirty
+        image: divyen/driver:v2.0.0-rc.1-57-g765e2820-dirty
         imagePullPolicy: "Always"
         env:
         - name: NODE_NAME
