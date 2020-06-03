@@ -552,7 +552,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	if c.manager.CnsConfig.FeatureStates.CSIMigration && volumePath != "" {
 		err = volumeMigrationService.DeleteVolumeInfo(ctx, volumePath)
 		if err != nil {
-			msg := fmt.Sprintf("failed to delete volumeInfo CR: %q for volumePath: %q. Error: %+v", volumePath, err)
+			msg := fmt.Sprintf("failed to delete volumeInfo CR for volumePath: %q. Error: %+v", volumePath, err)
 			log.Error(msg)
 			return nil, status.Errorf(codes.Internal, msg)
 		}

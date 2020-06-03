@@ -112,24 +112,34 @@ const (
 	// VsanDatastoreType is the string to identify datastore type as vsan.
 	VsanDatastoreType string = "vsan"
 
-	// when this param is found in the request and it is set to true,
-	// it indicates volume is requested using in-tree storageclass
+	// CSIMigrationParams helps identify if volume creation is requested by
+	// in-tree storageclass or CSI storageclass
 	CSIMigrationParams = "csimigration"
 
 	// AttributeInitialVolumeFilepath represents the path of volume where volume is created
 	AttributeInitialVolumeFilepath = "initialvolumefilepath"
 
-	// This param is used to supply datastore name for Volume provisioning
+	// DatastoreMigrationParam is used to supply datastore name for Volume provisioning
 	DatastoreMigrationParam = "datastore"
 
-	// This param supplies disk foramt (thin, thick, zeoredthick) for Volume provisioning
+	// DiskFormatMigrationParam supplies disk foramt (thin, thick, zeoredthick) for Volume provisioning
 	DiskFormatMigrationParam = "diskformat"
 
-	// vSAN Policy Parameters
+	// HostFailuresToTolerateMigrationParam is raw vSAN Policy Parameter
 	HostFailuresToTolerateMigrationParam = "hostfailurestotolerate"
-	ForceProvisioningMigrationParam      = "forceprovisioning"
-	CacheReservationMigrationParam       = "cachereservation"
-	DiskstripesMigrationParam            = "diskstripes"
+
+	// ForceProvisioningMigrationParam is raw vSAN Policy Parameter
+	ForceProvisioningMigrationParam = "forceprovisioning"
+
+	// CacheReservationMigrationParam is raw vSAN Policy Parameter
+	CacheReservationMigrationParam = "cachereservation"
+
+	// DiskstripesMigrationParam is raw vSAN Policy Parameter
+	DiskstripesMigrationParam = "diskstripes"
+
+	// ObjectspacereservationMigrationParam is raw vSAN Policy Parameter
 	ObjectspacereservationMigrationParam = "objectspacereservation"
-	IopslimitMigrationParam              = "iopslimit"
+
+	// IopslimitMigrationParam is raw vSAN Policy Parameter
+	IopslimitMigrationParam = "iopslimit"
 )

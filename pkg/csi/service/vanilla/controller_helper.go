@@ -58,7 +58,7 @@ func validateVanillaControllerExpandVolumeRequest(ctx context.Context, req *csi.
 
 func registerVolume(ctx context.Context, volumePath string, c *controller) (string, error) {
 	log := logger.GetLogger(ctx)
-	var registeredVolumeId string
+	var registeredVolumeID string
 	volumeMigrationSpec, err := volumeMigrationService.GetVolumeInfo(ctx, volumePath)
 	if err == migration.ErrVolumeNotRegistered {
 		log.Infof("Registering in-tree volume: %q", volumePath)
@@ -69,9 +69,9 @@ func registerVolume(ctx context.Context, volumePath string, c *controller) (stri
 			return "", status.Errorf(codes.Internal, msg)
 		}
 		volumeMigrationService.SaveVolumeInfo(ctx, volumeMigration)
-		registeredVolumeId = volumeMigration.Spec.VolumeID
+		registeredVolumeID = volumeMigration.Spec.VolumeID
 	} else {
-		registeredVolumeId = volumeMigrationSpec.VolumeID
+		registeredVolumeID = volumeMigrationSpec.VolumeID
 	}
-	return registeredVolumeId, nil
+	return registeredVolumeID, nil
 }

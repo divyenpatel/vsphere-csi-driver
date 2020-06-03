@@ -59,7 +59,7 @@ type Manager interface {
 	// QueryVolume returns volumes matching the given filter.
 	QueryVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter) (*cnstypes.CnsQueryResult, error)
 	// QueryVolumeInfo calls the CNS QueryVolumeInfo API and return a task, from which CnsQueryVolumeInfoResult is extracted
-	QueryVolumeInfo(ctx context.Context, volumeIDList []cnstypes.CnsVolumeId)  (*cnstypes.CnsQueryVolumeInfoResult, error)
+	QueryVolumeInfo(ctx context.Context, volumeIDList []cnstypes.CnsVolumeId) (*cnstypes.CnsQueryVolumeInfoResult, error)
 	// QueryAllVolume returns all volumes matching the given filter and selection.
 	QueryAllVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter, querySelection cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error)
 	// ExpandVolume expands a volume to a new size.

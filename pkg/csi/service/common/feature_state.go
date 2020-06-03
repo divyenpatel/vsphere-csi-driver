@@ -16,4 +16,7 @@ limitations under the License.
 
 package common
 
+// CSIMigrationFeatureEnabled is the global variable to help determine workflow
+// depending on feature is enabled or disabled
+// This is used in the util functions where config is not accessible.
 var CSIMigrationFeatureEnabled bool
