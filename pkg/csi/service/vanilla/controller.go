@@ -25,10 +25,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vmware/govmomi/cns"
 	vim25types "github.com/vmware/govmomi/vim25/types"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
+	migrationtypes "sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -38,7 +41,6 @@ import (
 	"github.com/zekroTJA/timedmap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"k8s.io/apimachinery/pkg/util/json"
 
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
@@ -191,15 +193,19 @@ func (c *controller) Init(config *config.Config) error {
 	}
 	// deletedVolumes timedmap with clean up interval of 1 minute to remove expired entries
 	deletedVolumes = timedmap.New(1 * time.Minute)
-	volumeMigrationService, err = migration.GetVolumeMigrationService(ctx)
-	if err != nil {
-		log.Errorf("failed to get migration service. Err: +v", err)
-		return err
-	}
-	err = volumeMigrationService.LoadAllVolumeInfo(ctx)
-	if err != nil {
-		log.Errorf("failed to load migrated volume info from CRDs. Err: %v", err)
-		return err
+	if config.FeatureStates.CSIMigration {
+		common.CSIMigrationFeatureEnabled = true
+		log.Infof("CSI Migration Feature is Enabled. Loading Volume Migration Service")
+		volumeMigrationService, err = migration.GetVolumeMigrationService(ctx)
+		if err != nil {
+			log.Errorf("failed to get migration service. Err: +v", err)
+			return err
+		}
+		err = volumeMigrationService.LoadAllVolumeInfo(ctx)
+		if err != nil {
+			log.Errorf("failed to load migrated volume info from CRDs. Err: %v", err)
+			return err
+		}
 	}
 	return nil
 }
@@ -271,32 +277,9 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		return nil, status.Errorf(codes.InvalidArgument, msg)
 	}
 
-	migrationParamJSON, migrationParamPresent := req.Parameters[common.CSIMigrationParams]
-	if migrationParamPresent {
-		// VSphereVolumeParameters struct helps encode in-tree legacy parameters in the JSON form and supply to CSI driver
-		// Driver can use this struct to decode JSON encoded string with supplied with csimigrationparam
-		// TODO: Remove this struct when CSI translation lib is released with this type
-		type VSphereVolumeParameters struct {
-			Datastore              string `json:"datastore,omitempty"`
-			Diskformat             string `json:"diskformat,omitempty"`
-			Hostfailurestotolerate string `json:"hostfailurestotolerate,omitempty"`
-			Forceprovisioning      string `json:"forceprovisioning,omitempty"`
-			Cachereservation       string `json:"cachereservation,omitempty"`
-			Diskstripes            string `json:"diskstripes,omitempty"`
-			Objectspacereservation string `json:"objectspacereservation,omitempty"`
-			Iopslimit              string `json:"iopslimit,omitempty"`
-		}
-		var legacyParameters VSphereVolumeParameters
-		err := json.Unmarshal([]byte(migrationParamJSON), &legacyParameters)
-		if err != nil {
-			msg := fmt.Sprintf("failed to unmarshal csimigrationparams. err: %v", err)
-			log.Error(msg)
-			return nil, status.Errorf(codes.Internal, msg)
-		}
-		log.Debugf("successfully unmarshaled csimigrationparams: %v", legacyParameters)
-		datastoreName := strings.TrimSpace(legacyParameters.Datastore)
-		if len(datastoreName) != 0 {
-			log.Infof("Converting datastore name: %q to Datastore URL", datastoreName)
+	if c.manager.CnsConfig.FeatureStates.CSIMigration && scParams.CSIMigration == "true" {
+		if len(scParams.Datastore) != 0 {
+			log.Infof("Converting datastore name: %q to Datastore URL", scParams.Datastore)
 			vcList := c.manager.VcenterManager.GetAllVirtualCenters()
 			dcList, err := vcList[0].GetDatacenters(ctx)
 			if err != nil {
@@ -313,9 +296,9 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 					return nil, status.Errorf(codes.Internal, msg)
 				}
 				for dsURL, dsInfo := range dsURLTodsInfoMap {
-					if dsInfo.Info.Name == datastoreName {
+					if dsInfo.Info.Name == scParams.Datastore {
 						scParams.DatastoreURL = dsURL
-						log.Infof("Found datastoreURL: %q for datastore name: %q", scParams.DatastoreURL, datastoreName)
+						log.Infof("Found datastoreURL: %q for datastore name: %q", scParams.DatastoreURL, scParams.Datastore)
 						foundDatastoreURL = true
 						break
 					}
@@ -325,7 +308,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 				}
 			}
 			if !foundDatastoreURL {
-				msg := fmt.Sprintf("failed to find datastoreURL for datastore name: %q", datastoreName)
+				msg := fmt.Sprintf("failed to find datastoreURL for datastore name: %q", scParams.Datastore)
 				log.Error(msg)
 				return nil, status.Errorf(codes.Internal, msg)
 			}
@@ -392,7 +375,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	}
 	attributes := make(map[string]string)
 	attributes[common.AttributeDiskType] = common.DiskTypeBlockVolume
-	if migrationParamPresent {
+	if c.manager.CnsConfig.FeatureStates.CSIMigration && scParams.CSIMigration == "true" {
 		// Return InitialVolumeFilepath in the response for TranslateCSIPVToInTree
 		volumeIds := []cnstypes.CnsVolumeId{{Id: volumeID}}
 		queryVolumeInfoResult, err := c.manager.VolumeManager.QueryVolumeInfo(ctx, volumeIds)
@@ -401,9 +384,30 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 		cnsBlockVolumeInfo := interface{}(queryVolumeInfoResult.VolumeInfo).(*cnstypes.CnsBlockVolumeInfo)
-		fileBackingInfo := interface{}(cnsBlockVolumeInfo.VStorageObject.Config.Backing).(vim25types.BaseConfigInfoFileBackingInfo)
+		fileBackingInfo := interface{}(cnsBlockVolumeInfo.VStorageObject.Config.Backing).(*vim25types.BaseConfigInfoDiskFileBackingInfo)
 		log.Infof("successfully retrieved volume path: %q for volume id: %q", fileBackingInfo.FilePath, volumeID)
 		attributes[common.AttributeInitialVolumeFilepath] = fileBackingInfo.FilePath
+
+		uuid, err := uuid.NewUUID()
+		if err != nil {
+			log.Errorf("failed to generate uuid")
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		cnsvSphereVolumeMigration := migrationtypes.CnsvSphereVolumeMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: uuid.String()},
+			Spec: migrationtypes.CnsvSphereVolumeMigrationSpec{
+				VolumePath: fileBackingInfo.FilePath,
+				VolumeID:   volumeID,
+				VolumeName: req.Name,
+			},
+		}
+		log.Infof("Saving cnsvSphereVolumeMigration CR: %v", cnsvSphereVolumeMigration)
+		err = volumeMigrationService.SaveVolumeInfo(ctx, cnsvSphereVolumeMigration)
+		if err != nil {
+			log.Errorf("failed to save cnsvSphereVolumeMigration CR:%v, err: %v", err)
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+		log.Infof("successfully saved cnsvSphereVolumeMigration CR: %v", cnsvSphereVolumeMigration)
 	}
 
 	resp := &csi.CreateVolumeResponse{
@@ -502,11 +506,6 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
 	log.Infof("CreateVolume: called with args %+v", *req)
-	err := validateVanillaCreateVolumeRequest(ctx, req)
-	if err != nil {
-		log.Errorf("failed to validate Create Volume Request with err: %v", err)
-		return nil, err
-	}
 
 	if common.IsFileVolumeRequest(ctx, req.GetVolumeCapabilities()) {
 		vsan67u3Release, err := isVsan67u3Release(ctx, c)
@@ -536,7 +535,8 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 		return nil, err
 	}
 	var volumePath string
-	if strings.Contains(req.VolumeId, ".vmdk") {
+
+	if c.manager.CnsConfig.FeatureStates.CSIMigration && strings.Contains(req.VolumeId, ".vmdk") {
 		volumePath = req.VolumeId
 		req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
 		if err != nil {
@@ -549,7 +549,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 		log.Error(msg)
 		return nil, status.Errorf(codes.Internal, msg)
 	}
-	if volumePath != "" {
+	if c.manager.CnsConfig.FeatureStates.CSIMigration && volumePath != "" {
 		err = volumeMigrationService.DeleteVolumeInfo(ctx, volumePath)
 		if err != nil {
 			msg := fmt.Sprintf("failed to delete volumeInfo CR: %q for volumePath: %q. Error: %+v", volumePath, err)
@@ -620,7 +620,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 	} else {
 		// Block Volume
 		// in-tree volume support
-		if strings.Contains(req.VolumeId, ".vmdk") {
+		if c.manager.CnsConfig.FeatureStates.CSIMigration && strings.Contains(req.VolumeId, ".vmdk") {
 			req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
 			if err != nil {
 				return nil, err
@@ -655,7 +655,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 		return nil, status.Errorf(codes.Internal, msg)
 	}
 	// in-tree volume support
-	if strings.Contains(req.VolumeId, ".vmdk") {
+	if c.manager.CnsConfig.FeatureStates.CSIMigration && strings.Contains(req.VolumeId, ".vmdk") {
 		req.VolumeId, err = registerVolume(ctx, req.VolumeId, c)
 		if err != nil {
 			return nil, err

@@ -112,12 +112,24 @@ const (
 	// VsanDatastoreType is the string to identify datastore type as vsan.
 	VsanDatastoreType string = "vsan"
 
-	// CSIMigrationParams holds all in-tree vSphere volume Parameters Key and values
-	// in the json encoded string
-	// TODO: Remove this const when CSI translation lib is available with this const
-	CSIMigrationParams = "csimigrationparams"
+	// when this param is found in the request and it is set to true,
+	// it indicates volume is requested using in-tree storageclass
+	CSIMigrationParams = "csimigration"
 
 	// AttributeInitialVolumeFilepath represents the path of volume where volume is created
-	// TODO: Remove this const when CSI translation lib is available with this const
 	AttributeInitialVolumeFilepath = "initialvolumefilepath"
+
+	// This param is used to supply datastore name for Volume provisioning
+	DatastoreMigrationParam = "datastore"
+
+	// This param supplies disk foramt (thin, thick, zeoredthick) for Volume provisioning
+	DiskFormatMigrationParam = "diskformat"
+
+	// vSAN Policy Parameters
+	HostFailuresToTolerateMigrationParam = "hostfailurestotolerate"
+	ForceProvisioningMigrationParam      = "forceprovisioning"
+	CacheReservationMigrationParam       = "cachereservation"
+	DiskstripesMigrationParam            = "diskstripes"
+	ObjectspacereservationMigrationParam = "objectspacereservation"
+	IopslimitMigrationParam              = "iopslimit"
 )

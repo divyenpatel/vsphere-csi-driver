@@ -242,7 +242,11 @@ func (volumeMigration *volumeMigration) DeleteVolumeInfo(ctx context.Context, vo
 	}
 	for _, object := range volumeMigrationCRList.Items {
 		if object.Spec.VolumePath == volumePath {
-			volumeMigration.migrationClient.Delete(ctx, &object)
+			err = volumeMigration.migrationClient.Delete(ctx, &object)
+			if err != nil {
+				log.Errorf("failed to delete CR for volumeMigration having volumePath: %q", volumePath)
+				return err
+			}
 			log.Infof("successfully deleted CR for volumeMigration having volumePath: %q", volumePath)
 			break
 		}

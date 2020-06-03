@@ -58,7 +58,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: divyen/driver:v2.0.0-rc.1-57-g765e2820-dirty
+          image: divyen/driver:v2.0.0-rc.1-58-gbb370cc2-dirty
           lifecycle:
             preStop:
               exec:
@@ -71,6 +71,8 @@ spec:
               value: "controller"
             - name: VSPHERE_CSI_CONFIG
               value: "/etc/cloud/csi-vsphere.conf"
+            - name: FEATURE_STATES
+              value: "/etc/cloud/csi-feature-states/csi-feature-states.conf"
             - name: LOGGER_LEVEL
               value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
           volumeMounts:
@@ -79,6 +81,9 @@ spec:
               readOnly: true
             - mountPath: /var/lib/csi/sockets/pluginproxy/
               name: socket-dir
+            - mountPath: /etc/cloud/csi-feature-states
+              name: csi-fss-config-volume
+              readOnly: true
           ports:
             - name: healthz
               containerPort: 9808
@@ -102,7 +107,7 @@ spec:
             - mountPath: /var/lib/csi/sockets/pluginproxy/
               name: socket-dir
         - name: vsphere-syncer
-          image: divyen/syncer:v2.0.0-rc.1-57-g765e2820-dirty
+          image: divyen/syncer:v2.0.0-rc.1-58-gbb370cc2-dirty
           args:
             - "--leader-election"
           imagePullPolicy: "Always"
@@ -136,6 +141,10 @@ spec:
       - name: vsphere-config-volume
         secret:
           secretName: vsphere-config-secret
+      - name: csi-fss-config-volume
+        configMap:
+          name: csi-feature-states
+          optional: true
       - name: socket-dir
         hostPath:
           path: /var/lib/csi/sockets/pluginproxy/csi.vsphere.vmware.com
