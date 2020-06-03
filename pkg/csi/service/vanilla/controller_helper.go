@@ -56,6 +56,8 @@ func validateVanillaControllerExpandVolumeRequest(ctx context.Context, req *csi.
 	return common.ValidateControllerExpandVolumeRequest(ctx, req)
 }
 
+// registerVolume helps register volume specified by volumePath with CNS
+// function returns volumeID after successful registration
 func registerVolume(ctx context.Context, volumePath string, c *controller) (string, error) {
 	log := logger.GetLogger(ctx)
 	var registeredVolumeID string
@@ -68,9 +70,16 @@ func registerVolume(ctx context.Context, volumePath string, c *controller) (stri
 			log.Error(msg)
 			return "", status.Errorf(codes.Internal, msg)
 		}
-		volumeMigrationService.SaveVolumeInfo(ctx, volumeMigration)
+		log.Infof("successfully registered volume: %q with CNS", volumePath)
+		err = volumeMigrationService.SaveVolumeInfo(ctx, volumeMigration)
+		if err != nil {
+			msg := fmt.Sprintf("failed to cache volumeMigration: %v err %+v", volumeMigration, err)
+			log.Error(msg)
+			return "", status.Errorf(codes.Internal, msg)
+		}
 		registeredVolumeID = volumeMigration.Spec.VolumeID
 	} else {
+		// Return VolumeID retrieved from cache
 		registeredVolumeID = volumeMigrationSpec.VolumeID
 	}
 	return registeredVolumeID, nil
