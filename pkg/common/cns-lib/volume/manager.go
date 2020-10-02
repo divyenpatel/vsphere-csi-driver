@@ -64,6 +64,8 @@ type Manager interface {
 	ExpandVolume(ctx context.Context, volumeID string, size int64) error
 	// ResetManager helps set new manager instance and VC configuration
 	ResetManager(ctx context.Context, vcenter *cnsvsphere.VirtualCenter)
+	// GetVCVersion helps return vCenter version manager is interacting with
+	GetVCVersion(ctx context.Context) (string, error)
 }
 
 var (
@@ -136,6 +138,16 @@ func (m *defaultManager) ResetManager(ctx context.Context, vcenter *cnsvsphere.V
 	}
 	m.virtualCenter.Config = vcenter.Config
 	log.Infof("Done resetting volume.defaultManager")
+}
+
+// GetVCVersion helps return vCenter version manager is interacting with
+func (m *defaultManager) GetVCVersion(ctx context.Context) (string, error) {
+	log := logger.GetLogger(ctx)
+	log.Debug("Checking the vCenter version")
+	if m.virtualCenter == nil || m.virtualCenter.Client == nil {
+		return "", errors.New("cannot retrieve vcenter version. virtualCenter is not initialized")
+	}
+	return m.virtualCenter.Client.Version, nil
 }
 
 // CreateVolume creates a new volume given its spec.

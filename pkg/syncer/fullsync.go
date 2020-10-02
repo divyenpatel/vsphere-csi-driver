@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -179,14 +180,26 @@ func fullSyncDeleteVolumes(ctx context.Context, volumeIDDeleteArray []cnstypes.C
 		return
 	}
 	// Verify if Volume is not in use by any other Cluster before removing CNS tag
+	vcVersion, err := metadataSyncer.volumeManager.GetVCVersion(ctx)
+	if err != nil {
+		log.Errorf("FullSync: failed to get vc version. Err: %v", err)
+		return
+	}
 	for _, queryResult := range allQueryResults {
 		for _, volume := range queryResult.Volumes {
 			inUsebyOtherK8SCluster := false
-			for _, metadata := range volume.Metadata.EntityMetadata {
-				if metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID != metadataSyncer.configInfo.Cfg.Global.ClusterID {
+			if vcVersion == cns.ReleaseVSAN67u3 {
+				if volume.Metadata.ContainerCluster.ClusterId != metadataSyncer.configInfo.Cfg.Global.ClusterID {
 					inUsebyOtherK8SCluster = true
-					log.Debugf("FullSync: fullSyncDeleteVolumes: Volume: %q is in use by other cluster.", volume.VolumeId.Id)
-					break
+					log.Debugf("FullSync: fullSyncDeleteVolumes: Volume: %q is in use by other cluster with cluster-id: %q", volume.VolumeId.Id, volume.Metadata.ContainerCluster.ClusterId)
+				}
+			} else {
+				for _, metadata := range volume.Metadata.EntityMetadata {
+					if metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID != metadataSyncer.configInfo.Cfg.Global.ClusterID {
+						inUsebyOtherK8SCluster = true
+						log.Debugf("FullSync: fullSyncDeleteVolumes: Volume: %q is in use by other cluster with cluster-id: %q.", volume.VolumeId.Id, metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID)
+						break
+					}
 				}
 			}
 			if !inUsebyOtherK8SCluster {
@@ -276,14 +289,25 @@ func getEntityMetadata(ctx context.Context, pvList []*v1.PersistentVolume, cnsVo
 		log.Errorf("getQueryResults failed to query volume metadata from vc. Err: %v", err)
 		return nil, nil, err
 	}
+	vcVersion, err := metadataSyncer.volumeManager.GetVCVersion(ctx)
+	if err != nil {
+		log.Errorf("failed to get vc version. Err: %v", err)
+		return nil, nil, err
+	}
 
 	for _, queryResult := range allQueryResults {
 		for _, volume := range queryResult.Volumes {
 			var cnsMetadata []cnstypes.BaseCnsEntityMetadata
 			allEntityMetadata := volume.Metadata.EntityMetadata
 			for _, metadata := range allEntityMetadata {
-				if metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID == metadataSyncer.configInfo.Cfg.Global.ClusterID {
-					cnsMetadata = append(cnsMetadata, metadata)
+				if vcVersion == cns.ReleaseVSAN67u3 {
+					if volume.Metadata.ContainerCluster.ClusterId == metadataSyncer.configInfo.Cfg.Global.ClusterID {
+						cnsMetadata = append(cnsMetadata, metadata)
+					}
+				} else {
+					if metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID == metadataSyncer.configInfo.Cfg.Global.ClusterID {
+						cnsMetadata = append(cnsMetadata, metadata)
+					}
 				}
 			}
 			pvToCnsEntityMetadataMap[volume.VolumeId.Id] = cnsMetadata
