@@ -390,12 +390,12 @@ func (vc *VirtualCenter) GetVsanDatastores(ctx context.Context) (map[string]*Dat
 		pc := property.DefaultCollector(dc.Client())
 		properties := []string{"summary", "info"}
 		err = pc.Retrieve(ctx, dsMorList, properties, &dsMoList)
+		pc.Destroy(ctx)
 		if err != nil {
 			log.Errorf("failed to get Datastore managed objects from datastore objects."+
 				" dsObjList: %+v, properties: %+v, err: %v", dsMorList, properties, err)
 			return nil, err
 		}
-
 		for _, dsMo := range dsMoList {
 			if dsMo.Summary.Type == "vsan" {
 				vsanDsURLInfoMap[dsMo.Info.GetDatastoreInfo().Url] = &DatastoreInfo{

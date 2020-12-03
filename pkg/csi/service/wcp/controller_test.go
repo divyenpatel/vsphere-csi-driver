@@ -205,6 +205,7 @@ func getFakeDatastores(ctx context.Context, vc *cnsvsphere.VirtualCenter, cluste
 	}
 	var dsMoList []mo.Datastore
 	pc := property.DefaultCollector(dc.Client())
+	defer pc.Destroy(ctx)
 	properties := []string{"info"}
 	err = pc.Retrieve(ctx, dsList, properties, &dsMoList)
 	if err != nil {

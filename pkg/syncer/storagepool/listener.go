@@ -137,6 +137,7 @@ func initListener(ctx context.Context, scWatchCntlr *StorageClassWatch, spContro
 				log.Debugf("Done processing %d property collector update(s)", len(updates))
 				return false
 			})
+			p.Destroy(ctx)
 			if err != nil {
 				log.Infof("Property collector session needs to be reestablished due to err: %v", err)
 				err = spController.vc.Connect(ctx)

@@ -172,6 +172,7 @@ func (f *FakeNodeManager) GetSharedDatastoresInK8SCluster(ctx context.Context) (
 	}
 	var dsMoList []mo.Datastore
 	pc := property.DefaultCollector(dc.Client())
+	defer pc.Destroy(ctx)
 	properties := []string{"info"}
 	err = pc.Retrieve(ctx, dsList, properties, &dsMoList)
 	if err != nil {

@@ -50,6 +50,7 @@ func (host *HostSystem) GetAllAccessibleDatastores(ctx context.Context) ([]*Data
 
 	var dsMoList []mo.Datastore
 	pc := property.DefaultCollector(host.Client())
+	defer pc.Destroy(ctx)
 	properties := []string{"info"}
 	err = pc.Retrieve(ctx, dsRefList, properties, &dsMoList)
 	if err != nil {

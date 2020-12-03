@@ -445,6 +445,7 @@ func getDatastoreByURL(ctx context.Context, datastoreURL string, dc *object.Data
 
 	var dsMoList []mo.Datastore
 	pc := property.DefaultCollector(dc.Client())
+	defer pc.Destroy(ctx)
 	properties := []string{"info"}
 	err = pc.Retrieve(ctx, dsList, properties, &dsMoList)
 	if err != nil {

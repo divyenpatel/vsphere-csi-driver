@@ -63,6 +63,7 @@ func (dc *Datacenter) GetDatastoreByURL(ctx context.Context, datastoreURL string
 
 	var dsMoList []mo.Datastore
 	pc := property.DefaultCollector(dc.Client())
+	defer pc.Destroy(ctx)
 	properties := []string{DatastoreInfoProperty}
 	err = pc.Retrieve(ctx, dsList, properties, &dsMoList)
 	if err != nil {
@@ -183,6 +184,7 @@ func (dc *Datacenter) GetVMMoList(ctx context.Context, vmObjList []*VirtualMachi
 		vmRefs = append(vmRefs, vmObj.Reference())
 	}
 	pc := property.DefaultCollector(dc.Client())
+	defer pc.Destroy(ctx)
 	err := pc.Retrieve(ctx, vmRefs, properties, &vmMoList)
 	if err != nil {
 		log.Errorf("failed to get VM managed objects from VM objects. vmObjList: %+v, properties: %+v, err: %v", vmObjList, properties, err)
@@ -208,6 +210,7 @@ func (dc *Datacenter) GetAllDatastores(ctx context.Context) (map[string]*Datasto
 	}
 	var dsMoList []mo.Datastore
 	pc := property.DefaultCollector(dc.Client())
+	defer pc.Destroy(ctx)
 	properties := []string{"info"}
 	err = pc.Retrieve(ctx, dsList, properties, &dsMoList)
 	if err != nil {

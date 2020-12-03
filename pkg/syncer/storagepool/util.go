@@ -73,6 +73,7 @@ func getDatastoreProperties(ctx context.Context, d *cnsvsphere.DatastoreInfo) *d
 	log := logger.GetLogger(ctx)
 	var ds mo.Datastore
 	pc := property.DefaultCollector(d.Client())
+	defer pc.Destroy(ctx)
 	err := pc.RetrieveOne(ctx, d.Reference(), []string{"summary", "info"}, &ds)
 	if err != nil {
 		log.Errorf("Error retrieving datastore summary for %v. Err: %v", d, err)

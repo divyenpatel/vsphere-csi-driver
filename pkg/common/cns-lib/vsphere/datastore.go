@@ -50,6 +50,7 @@ func (ds *Datastore) GetDatastoreURLAndType(ctx context.Context) (string, string
 	log := logger.GetLogger(ctx)
 	var dsMo mo.Datastore
 	pc := property.DefaultCollector(ds.Client())
+	defer pc.Destroy(ctx)
 	err := pc.RetrieveOne(ctx, ds.Datastore.Reference(), []string{"summary"}, &dsMo)
 	if err != nil {
 		log.Errorf("Failed to retrieve datastore summary property: %v", err)

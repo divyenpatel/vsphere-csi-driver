@@ -375,6 +375,7 @@ func getDsToFileServiceEnabledMap(ctx context.Context, vc *vsphere.VirtualCenter
 
 	// Get clusters which are vSAN and have vSAN FS enabled
 	pc := property.DefaultCollector(vc.Client.Client)
+	defer pc.Destroy(ctx)
 	properties := []string{"info", "summary"}
 	// Get all the vsan datastores with vsan FS from these clusters and add it to map.
 	for _, cluster := range clusterComputeResourceWithPriv {
