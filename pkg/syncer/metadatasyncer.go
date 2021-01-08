@@ -369,7 +369,10 @@ func pvDeleted(obj interface{}, metadataSyncer *MetadataSyncInformer) {
 		return
 	}
 	if pv.Spec.ClaimRef != nil && pv.Status.Phase == v1.VolumeReleased && pv.Spec.PersistentVolumeReclaimPolicy == v1.PersistentVolumeReclaimDelete {
-		klog.V(3).Infof("PVDeleted: Volume deletion will be handled by Controller")
+		klog.V(2).Infof("PVDeleted: Volume deletion should be handled by Controller, but here syncer is helping to delete volume, for the case when PVC is deleted when it has PV in the terminating phase")
+		if err := volumes.GetManager(metadataSyncer.vcenter).DeleteVolume(pv.Spec.CSI.VolumeHandle, true); err != nil {
+			klog.Errorf("PVDeleted: Failed to delete disk %s with error %+v", pv.Spec.CSI.VolumeHandle, err)
+		}
 		return
 	}
 
