@@ -173,7 +173,7 @@ func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 				os.Exit(1)
 			}
 		}()
-		if err := syncer.InitMetadataSyncer(ctx, clusterFlavor, configInfo); err != nil {
+		if err := syncer.InitMetadataSyncer(ctx, clusterFlavor, configInfo, coInitParams); err != nil {
 			log.Errorf("Error initializing Metadata Syncer. Error: %+v", err)
 			os.Exit(1)
 		}

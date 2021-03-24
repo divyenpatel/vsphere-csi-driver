@@ -37,11 +37,13 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/workqueue"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
-
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+
+	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco/k8sorchestrator"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/featurestates"
 
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator"
 	volumes "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
@@ -119,7 +121,7 @@ func getVolumeHealthIntervalInMin(ctx context.Context) int {
 }
 
 // InitMetadataSyncer initializes the Metadata Sync Informer
-func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, configInfo *cnsconfig.ConfigurationInfo) error {
+func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, configInfo *cnsconfig.ConfigurationInfo, param interface{}) error {
 	log := logger.GetLogger(ctx)
 	var err error
 	log.Infof("Initializing MetadataSyncer")
@@ -166,6 +168,22 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		}
 		metadataSyncer.host = vCenter.Config.Host
 		metadataSyncer.volumeManager = volumes.GetManager(ctx, vCenter)
+	}
+
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSISVFeatureStateReplication) {
+			log.Info("Starting SvFSSReplicationService")
+			svParams, ok := param.(k8sorchestrator.K8sSupervisorInitParams)
+			if !ok {
+				return fmt.Errorf("expected orchestrator params of type K8sSupervisorInitParams, got %T instead", param)
+			}
+			go func() {
+				if err := featurestates.StartSvFSSReplicationService(ctx, svParams.SupervisorFeatureStatesConfigInfo.Name, svParams.SupervisorFeatureStatesConfigInfo.Namespace); err != nil {
+					log.Errorf("Error starting sv FSS ReplicationService. Error: %+v", err)
+					os.Exit(1)
+				}
+			}()
+		}
 	}
 
 	// Initialize cnsDeletionMap used by Full Sync
