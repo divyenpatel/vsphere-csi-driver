@@ -57,7 +57,7 @@ const (
 type pendingCRUpdates struct {
 	// lock to acquire before updating pendingCRUpdateTask and pendingCRCreateTask
 	lock            *sync.RWMutex
-	pendingCRUpdate map[string]*featurestatesv1alpha1.CnsCsiSvFeatureStates
+	pendingCRUpdate map[string][]featurestatesv1alpha1.FeatureState
 }
 
 var (
@@ -77,7 +77,7 @@ func StartSvFSSReplicationService(ctx context.Context, svFeatureStatConfigMapNam
 	supervisorFeatureStateConfigMapNamespace = svFeatureStateConfigMapNamespace
 	pendingCRUpdatesObj = &pendingCRUpdates{
 		lock:            &sync.RWMutex{},
-		pendingCRUpdate: make(map[string]*featurestatesv1alpha1.CnsCsiSvFeatureStates),
+		pendingCRUpdate: make(map[string][]featurestatesv1alpha1.FeatureState),
 	}
 	// This is idempotent if CRD is pre-created then we continue with initialization of svFSSReplicationService
 	err := k8s.CreateCustomResourceDefinitionFromSpec(ctx, CRDName, CRDSingular, CRDPlural,
@@ -107,23 +107,22 @@ func StartSvFSSReplicationService(ctx context.Context, svFeatureStatConfigMapNam
 	}
 
 	// create/update feature state CRs in all workload namespaces
-	err = updateFeatureStatesCRInAllWorkLoadNamespaces(ctx, []featurestatesv1alpha1.FeatureState{})
-	if err != nil {
-		log.Errorf("failed to update feature states CR in the workload namespaces. err: %v", err)
-		return err
-	}
-
+	pendingCRUpdatesObj.enqueueCRUpdatesForAllWorkloadNamespaces(ctx, getFeatureStates(ctx))
 	// Create k8s Informer and watch on configmaps and namespaces
 	informer := k8s.NewInformer(k8sClient)
 	informer.AddConfigMapListener(ctx, k8sClient, svFeatureStateConfigMapNamespace,
 		// Add
-		nil,
+		func(Obj interface{}) {
+			configMapAdded(Obj)
+		},
 		// Update
 		func(oldObj interface{}, newObj interface{}) {
 			configMapUpdated(oldObj, newObj)
 		},
 		// Delete
-		nil)
+		func(obj interface{}) {
+			configMapDeleted(obj)
+		})
 	informer.AddNamespaceListener(
 		// Add
 		func(obj interface{}) {
@@ -137,7 +136,7 @@ func StartSvFSSReplicationService(ctx context.Context, svFeatureStatConfigMapNam
 	log.Infof("informer on config-map and namespaces started")
 
 	// Start Retry routine to process failed create or update CRs
-	go pendingCRUpdatesObj.startRetryAttempts()
+	go pendingCRUpdatesObj.processPendingCRUpdates()
 	log.Infof("started background routine to process failed CR updates at regular interval")
 	log.Infof("SvFSSReplicationService is running")
 	var stopCh = make(chan bool)
@@ -145,58 +144,57 @@ func StartSvFSSReplicationService(ctx context.Context, svFeatureStatConfigMapNam
 	return nil
 }
 
-// startRetryAttempts helps process pending failed CR updates
-func (pendingCRUpdatesObj *pendingCRUpdates) startRetryAttempts() {
+// processPendingCRUpdates helps process pending CR updates at regular interval
+func (pendingCRUpdatesObj *pendingCRUpdates) processPendingCRUpdates() {
 	for {
 		func() {
 			pendingCRUpdatesObj.lock.Lock()
 			defer pendingCRUpdatesObj.lock.Unlock()
 			ctx, log := logger.GetNewContextWithLogger()
-			log.Infof("performing retry operations on failed feature states CRs")
-
-			for namespace, featurestatesSpec := range pendingCRUpdatesObj.pendingCRUpdate {
-				if featurestatesSpec != nil {
-					// Check if namespace for the CR is still present on the cluster
-					_, err := k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+			log.Infof("starting to process pending feature state updates")
+			for namespace, featurestates := range pendingCRUpdatesObj.pendingCRUpdate {
+				if len(featurestates) != 0 {
+					// Check if namespace still present on the cluster
+					namespacePresent, err := isNamespacePresent(ctx, namespace)
 					if err != nil {
-						if apierrors.IsNotFound(err) {
-							// if Namespace is not present, mark pending task as done
-							pendingCRUpdatesObj.pendingCRUpdate[namespace] = nil
-							continue
-						} else {
-							log.Errorf("failed to check if namespace: %q is present on the cluster", namespace)
-							continue
-						}
+						continue
 					}
-					// check if CR is present on the namespace
-					featurestateCR := &featurestatesv1alpha1.CnsCsiSvFeatureStates{}
-					err = controllerRuntimeClient.Get(ctx, client.ObjectKey{Name: SVFeatureStateCRName, Namespace: namespace}, featurestateCR)
-					if err != nil {
-						if apierrors.IsNotFound(err) {
-							// attempt to Create the CR
-							err = controllerRuntimeClient.Create(ctx, featurestatesSpec)
-							if err != nil {
-								log.Errorf("failed to create cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", featurestatesSpec.Namespace, err)
-							} else {
-								log.Infof("created cnsCsiSvFeatureStates CR instance in the namespace: %q", featurestatesSpec.Namespace)
+					if namespacePresent {
+						// check if CR is present on the namespace
+						featurestateCR := &featurestatesv1alpha1.CnsCsiSvFeatureStates{}
+						err = controllerRuntimeClient.Get(ctx, client.ObjectKey{Name: SVFeatureStateCRName, Namespace: namespace}, featurestateCR)
+						if err != nil {
+							if !apierrors.IsNotFound(err) {
+								log.Errorf("failed to get cnsCsiSvFeatureStates CR instance from the namespace: %q, Err: %v", namespace, err)
+								continue
 							}
+							// attempt to Create the CR
+							cnsCsiSvFeatureStates := &featurestatesv1alpha1.CnsCsiSvFeatureStates{
+								ObjectMeta: metav1.ObjectMeta{Name: SVFeatureStateCRName, Namespace: namespace},
+								Spec: featurestatesv1alpha1.CnsCsiSvFeatureStatesSpec{
+									FeatureStates: featurestates,
+								},
+							}
+							err = controllerRuntimeClient.Create(ctx, cnsCsiSvFeatureStates)
+							if err != nil {
+								log.Errorf("failed to create cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", namespace, err)
+								continue
+							}
+							log.Infof("created cnsCsiSvFeatureStates CR instance in the namespace: %q", namespace)
 						} else {
-							log.Errorf("failed to get cnsCsiSvFeatureStates CR instance from the namespace: %q, Err: %v", featurestatesSpec.Namespace, err)
+							// Attempt to Update CR
+							featurestateCR.Spec.FeatureStates = featurestates
+							err = controllerRuntimeClient.Update(ctx, featurestateCR)
+							if err != nil {
+								log.Errorf("failed to update cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", namespace, err)
+								continue
+							}
+							log.Infof("updated cnsCsiSvFeatureStates CR instance in the namespace: %q", namespace)
 						}
 					} else {
-						// Attempt to Update CR
-						featurestateCR.Spec.FeatureStates = featurestatesSpec.Spec.FeatureStates
-						err = controllerRuntimeClient.Update(ctx, featurestateCR)
-						if err != nil {
-							log.Errorf("failed to update cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", featurestatesSpec.Namespace, err)
-						} else {
-							log.Infof("updated cnsCsiSvFeatureStates CR instance in the namespace: %q", featurestatesSpec.Namespace)
-						}
+						log.Infof("namespace: %q no longer present on the cluster. clearing pending featurestate updates", namespace)
 					}
-					// if no error observed, mark pending task as done
-					if err == nil {
-						pendingCRUpdatesObj.pendingCRUpdate[namespace] = nil
-					}
+					pendingCRUpdatesObj.pendingCRUpdate[namespace] = nil
 				}
 			}
 		}()
@@ -204,100 +202,57 @@ func (pendingCRUpdatesObj *pendingCRUpdates) startRetryAttempts() {
 	}
 }
 
-// updateFeatureStatesCRInAllWorkLoadNamespaces helps update latest featureStates to all workload namespaces
-func updateFeatureStatesCRInAllWorkLoadNamespaces(ctx context.Context, featurestates []featurestatesv1alpha1.FeatureState) error {
+// enqueueCRUpdatesForAllWorkloadNamespaces helps enqueue CR updates for all workload namespaces
+func (pendingCRUpdatesObj *pendingCRUpdates) enqueueCRUpdatesForAllWorkloadNamespaces(ctx context.Context, featurestates []featurestatesv1alpha1.FeatureState) {
 	pendingCRUpdatesObj.lock.Lock()
 	defer pendingCRUpdatesObj.lock.Unlock()
-
 	log := logger.GetLogger(ctx)
-	log.Info("updating feature states in all workload namespaces")
-
-	// retrieving all workload namespaces
-	namespaces, err := k8sClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
-		LabelSelector: WorkLoadNamespaceLabelKey,
-	})
-	if err != nil {
-		log.Errorf("failed to list workload namespaces. Err: %v", err)
-		return err
-	}
-
-	if len(featurestates) == 0 {
-		featurestates, err = getFeatureStates(ctx, k8sClient)
-		if err != nil {
-			log.Errorf("failed to get latest featurestates. Err: %v", err)
-			return err
-		}
-	}
-	// creating and updating CRs in all workload namespaces to push latest feature switch state from SV Config map
+	namespaces := getAllWorkloadNamespaces(ctx)
 	for _, namespace := range namespaces.Items {
-		cnsCsiSvFeatureStates := &featurestatesv1alpha1.CnsCsiSvFeatureStates{
-			ObjectMeta: metav1.ObjectMeta{Name: SVFeatureStateCRName, Namespace: namespace.Name},
-			Spec: featurestatesv1alpha1.CnsCsiSvFeatureStatesSpec{
-				FeatureStates: featurestates,
-			},
-		}
-		// check if CR is present on the namespace
-		featurestateCR := &featurestatesv1alpha1.CnsCsiSvFeatureStates{}
-		err := controllerRuntimeClient.Get(ctx, client.ObjectKey{Name: SVFeatureStateCRName, Namespace: namespace.Name}, featurestateCR)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				// CR is not present on the namespace, attempt to Create the CR
-				err = controllerRuntimeClient.Create(ctx, cnsCsiSvFeatureStates)
-				if err != nil {
-					log.Errorf("failed to create cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", cnsCsiSvFeatureStates.Namespace, err)
-				} else {
-					log.Infof("created cnsCsiSvFeatureStates CR instance in the namespace: %q", cnsCsiSvFeatureStates.Namespace)
-				}
-			}
-		} else {
-			// Attempt to Update CR, as CR is present and err is nil
-			featurestateCR.Spec.FeatureStates = cnsCsiSvFeatureStates.Spec.FeatureStates
-			err = controllerRuntimeClient.Update(ctx, featurestateCR)
-			if err != nil {
-				log.Errorf("failed to update cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", cnsCsiSvFeatureStates.Namespace, err)
-			} else {
-				log.Infof("updated cnsCsiSvFeatureStates CR instance in the namespace: %q", cnsCsiSvFeatureStates.Namespace)
-			}
-		}
-		if err != nil {
-			// update any prior CR update for this namespace, to cache latest feature state
-			pendingCRUpdatesObj.pendingCRUpdate[namespace.Name] = cnsCsiSvFeatureStates
-		} else {
-			// remove any prior pending CR update for this namespace, as latest state is applied
-			pendingCRUpdatesObj.pendingCRUpdate[namespace.Name] = nil
-		}
+		pendingCRUpdatesObj.pendingCRUpdate[namespace.Name] = featurestates
+		log.Infof("enqueued CR updates for workload namespace: %q", namespace)
 	}
-	return nil
 }
 
-// createFeatureStatesCRInWorkLoadNamespace helps create latest featureStates CR in the specified namespace with latest feature states
-func createFeatureStatesCRInWorkLoadNamespace(ctx context.Context, namespace string) error {
+// enqueueCRUpdatesForWorkloadNamespace enqueues CR updates for specified workload namespaces
+func (pendingCRUpdatesObj *pendingCRUpdates) enqueueCRUpdatesForNewWorkloadNamespace(ctx context.Context, namespace string) {
 	pendingCRUpdatesObj.lock.Lock()
 	defer pendingCRUpdatesObj.lock.Unlock()
-
 	log := logger.GetLogger(ctx)
-	log.Infof("creating feature states in the namespaces: %q", namespace)
-
-	featureStates, err := getFeatureStates(ctx, k8sClient)
-	if err != nil {
-		log.Errorf("failed to get latest featurestates. Err: %v", err)
-		return err
-	}
-	cnsCsiSvFeatureStates := &featurestatesv1alpha1.CnsCsiSvFeatureStates{
-		ObjectMeta: metav1.ObjectMeta{Name: SVFeatureStateCRName, Namespace: namespace},
-		Spec: featurestatesv1alpha1.CnsCsiSvFeatureStatesSpec{
-			FeatureStates: featureStates,
-		},
-	}
-	err = controllerRuntimeClient.Create(ctx, cnsCsiSvFeatureStates)
-	if err != nil {
-		log.Errorf("failed to create cnsCsiSvFeatureStates CR instance in the namespace: %q, Err: %v", cnsCsiSvFeatureStates.Namespace, err)
-		pendingCRUpdatesObj.pendingCRUpdate[namespace] = cnsCsiSvFeatureStates
-	}
-	return nil
+	pendingCRUpdatesObj.pendingCRUpdate[namespace] = getFeatureStates(ctx)
+	log.Infof("enqueued CR updates for workload namespace: %q", namespace)
 }
 
-// configMapUpdated is the call back function for config-map informer
+// configMapAdded is called when configmap is created
+func configMapAdded(obj interface{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
+
+	fssConfigMap, ok := obj.(*v1.ConfigMap)
+	if fssConfigMap == nil || !ok {
+		log.Warnf("configMapAdded: unrecognized object %+v", obj)
+		return
+	}
+	if fssConfigMap.Name == supervisorFeatureStatConfigMapName &&
+		fssConfigMap.Namespace == supervisorFeatureStateConfigMapNamespace {
+		var err error
+		var featureStates []featurestatesv1alpha1.FeatureState
+		for feature, state := range fssConfigMap.Data {
+			var featureState featurestatesv1alpha1.FeatureState
+			featureState.Name = feature
+			featureState.Enabled, err = strconv.ParseBool(state)
+			if err != nil {
+				log.Errorf("failed to parse feature state value: %v for feature: %q", state, feature)
+			}
+			featureStates = append(featureStates, featureState)
+		}
+		pendingCRUpdatesObj.enqueueCRUpdatesForAllWorkloadNamespaces(ctx, featureStates)
+	}
+}
+
+// configMapUpdated is called when configmap is updated
 func configMapUpdated(oldObj, newObj interface{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -328,22 +283,28 @@ func configMapUpdated(oldObj, newObj interface{}) {
 			featureState.Enabled, err = strconv.ParseBool(state)
 			if err != nil {
 				log.Errorf("failed to parse feature state value: %v for feature: %q", state, feature)
-				return
 			}
 			featureStates = append(featureStates, featureState)
 		}
-		for {
-			// if failed to create or update CR in the namespace, then error is not returned
-			// for such cases, CR update will be enqueued to pendingCRUpdatesObj
-			err := updateFeatureStatesCRInAllWorkLoadNamespaces(ctx, featureStates)
-			if err == nil {
-				log.Infof("updated feature states: %v in the all workload namespaces", featureStates)
-				break
-			} else {
-				log.Errorf("failed to update feature states CR in the workload namespaces. err: %v", err)
-			}
-			time.Sleep(2 * time.Second)
-		}
+		pendingCRUpdatesObj.enqueueCRUpdatesForAllWorkloadNamespaces(ctx, featureStates)
+	}
+}
+
+// configMapDeleted is called when config-map is deleted
+func configMapDeleted(obj interface{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
+
+	fssConfigMap, ok := obj.(*v1.ConfigMap)
+	if fssConfigMap == nil || !ok {
+		log.Warnf("configMapAdded: unrecognized object %+v", obj)
+		return
+	}
+	if fssConfigMap.Name == supervisorFeatureStatConfigMapName &&
+		fssConfigMap.Namespace == supervisorFeatureStateConfigMapNamespace {
+		log.Warnf("supervisor feature switch state configmap %q from the namespace: %q is deleted", supervisorFeatureStatConfigMapName, supervisorFeatureStateConfigMapNamespace)
 	}
 }
 
@@ -361,29 +322,25 @@ func namespaceAdded(obj interface{}) {
 	}
 	if _, ok = namespace.Labels[WorkLoadNamespaceLabelKey]; ok {
 		log.Infof("observed new workload namespace: %v", namespace.Name)
-		for {
-			// if failed to create CR in the namespace, then error is not returned
-			// for such case, CR update will be enqueued to pendingCRUpdatesObj
-			err := createFeatureStatesCRInWorkLoadNamespace(ctx, namespace.Name)
-			if err == nil {
-				log.Infof("created feature states CR in the namespaces: %q", namespace.Name)
-				break
-			}
-			log.Errorf("failed to create feature states CR in the workload namespace: %q, err: %v", namespace.Name, err)
-		}
+		pendingCRUpdatesObj.enqueueCRUpdatesForNewWorkloadNamespace(ctx, namespace.Name)
 	}
 }
 
-// getFeatureStates returns latest feature states from supervisor
-func getFeatureStates(ctx context.Context, k8sClient clientset.Interface) ([]featurestatesv1alpha1.FeatureState, error) {
+// getFeatureStates returns latest feature states from supervisor config-map
+func getFeatureStates(ctx context.Context) []featurestatesv1alpha1.FeatureState {
 	log := logger.GetLogger(ctx)
 	//  Retrieve SV FeatureStates configmap
-	fssConfigMap, err := k8sClient.CoreV1().ConfigMaps(supervisorFeatureStateConfigMapNamespace).Get(ctx, supervisorFeatureStatConfigMapName, metav1.GetOptions{})
-	if err != nil {
+	var fssConfigMap *v1.ConfigMap
+	var err error
+	for {
+		fssConfigMap, err = k8sClient.CoreV1().ConfigMaps(supervisorFeatureStateConfigMapNamespace).Get(ctx, supervisorFeatureStatConfigMapName, metav1.GetOptions{})
+		if err == nil {
+			break
+		}
 		log.Errorf("failed to retrieve SV feature switch state from namespace:%q with name: %q", supervisorFeatureStateConfigMapNamespace, supervisorFeatureStatConfigMapName)
-		return nil, err
+		time.Sleep(time.Second)
 	}
-
+	log.Infof("sucessfully retrieved SV feature switch state from namespace:%q with name: %q", supervisorFeatureStateConfigMapNamespace, supervisorFeatureStatConfigMapName)
 	var featureStates []featurestatesv1alpha1.FeatureState
 	for feature, state := range fssConfigMap.Data {
 		var featureState featurestatesv1alpha1.FeatureState
@@ -391,9 +348,42 @@ func getFeatureStates(ctx context.Context, k8sClient clientset.Interface) ([]fea
 		featureState.Enabled, err = strconv.ParseBool(state)
 		if err != nil {
 			log.Errorf("failed to parse feature state value: %v for feature: %q", state, feature)
-			return nil, err
 		}
 		featureStates = append(featureStates, featureState)
 	}
-	return featureStates, nil
+	return featureStates
+}
+
+// getAllWorkloadNamespaces returns all workload namespaces from the cluster
+func getAllWorkloadNamespaces(ctx context.Context) *v1.NamespaceList {
+	log := logger.GetLogger(ctx)
+	// retrieving all workload namespaces
+	var namespaces *v1.NamespaceList
+	var err error
+	for {
+		namespaces, err = k8sClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{LabelSelector: WorkLoadNamespaceLabelKey})
+		if err == nil {
+			break
+		}
+		log.Errorf("failed to list workload namespaces. Err: %v", err)
+		time.Sleep(time.Second)
+	}
+	log.Info("successfully retrieved all workload namespaces")
+	return namespaces
+}
+
+// isNamespacePresent returns true if specified namespace is present on the cluster, else returns false
+// if error observed while checking namespace, err is returned
+func isNamespacePresent(ctx context.Context, namespace string) (bool, error) {
+	log := logger.GetLogger(ctx)
+	// Check if namespace for the CR is still present on the cluster
+	_, err := k8sClient.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		log.Errorf("failed to check if namespace: %q is present on the cluster", namespace)
+		return false, err
+	}
+	return true, nil
 }
