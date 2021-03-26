@@ -121,7 +121,7 @@ func getVolumeHealthIntervalInMin(ctx context.Context) int {
 }
 
 // InitMetadataSyncer initializes the Metadata Sync Informer
-func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, configInfo *cnsconfig.ConfigurationInfo, param interface{}) error {
+func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, configInfo *cnsconfig.ConfigurationInfo) error {
 	log := logger.GetLogger(ctx)
 	var err error
 	log.Infof("Initializing MetadataSyncer")
@@ -171,11 +171,10 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 	}
 
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSISVFeatureStateReplication) {
-			log.Info("Starting SvFSSReplicationService")
-			svParams, ok := param.(k8sorchestrator.K8sSupervisorInitParams)
+		if metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.CSISVFeatureStateReplication) {
+			svParams, ok := COInitParams.(k8sorchestrator.K8sSupervisorInitParams)
 			if !ok {
-				return fmt.Errorf("expected orchestrator params of type K8sSupervisorInitParams, got %T instead", param)
+				return fmt.Errorf("expected orchestrator params of type K8sSupervisorInitParams, got %T instead", COInitParams)
 			}
 			go func() {
 				if err := featurestates.StartSvFSSReplicationService(ctx, svParams.SupervisorFeatureStatesConfigInfo.Name, svParams.SupervisorFeatureStatesConfigInfo.Namespace); err != nil {

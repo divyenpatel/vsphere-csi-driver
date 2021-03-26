@@ -104,7 +104,7 @@ func (im *InformerManager) AddNamespaceListener(add func(obj interface{}), updat
 	if im.namespaceInformer == nil {
 		im.namespaceInformer = im.informerFactory.Core().V1().Namespaces().Informer()
 	}
-	im.namespaceSynced = im.pvInformer.HasSynced
+	im.namespaceSynced = im.namespaceInformer.HasSynced
 
 	im.namespaceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    add,

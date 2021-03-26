@@ -15,7 +15,7 @@ metadata:
   name: vsphere-csi-controller-role
 rules:
 - apiGroups: [""]
-  resources: ["nodes", "pods", "configmaps", "resourcequotas"]
+  resources: ["nodes", "pods", "configmaps", "resourcequotas", "namespaces"]
   verbs: ["get", "list", "watch"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
@@ -47,11 +47,8 @@ rules:
 - apiGroups: ["cns.vmware.com"]
   resources: ["triggercsifullsyncs"]
   verbs: ["create", "get", "update", "watch", "list"]
-- apiGroups: [""]
-  resources: ["namespace"]
-  verbs: ["get", "list", "watch"]
 - apiGroups: ["cns.vmware.com"]
-  resources: ["cnscsisvfeaturestate"]
+  resources: ["cnscsisvfeaturestates"]
   verbs: ["create", "get", "list", "update"]
 - apiGroups: ["cns.vmware.com"]
   resources: ["storagepools"]
