@@ -1,0 +1,12 @@
+apiVersion: v1
+data:
+  cns-csi.conf: |
+    [GC]
+    endpoint = "{{ .SupervisorMasterEndpointHostName }}"
+    port = "{{ .SupervisorMasterPort }}"
+    tanzukubernetescluster-uid = "{{ .TanzuKubernetesClusterUID }}"
+    tanzukubernetescluster-name = "{{ .TanzuKubernetesClusterName }}"
+kind: ConfigMap
+metadata:
+  name: pvcsi-config
+  namespace: {{ .PVCSISeedClusterNamespace }}

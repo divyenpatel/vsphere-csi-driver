@@ -1,0 +1,204 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: vsphere-csi-controller
+  namespace: {{ .PVCSISeedClusterNamespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vsphere-csi-controller
+  template:
+    metadata:
+      labels:
+        app: vsphere-csi-controller
+        role: vsphere-csi
+    spec:
+      serviceAccountName: vsphere-csi-controller
+      nodeSelector:
+        node-role.kubernetes.io/master: ""
+      tolerations:
+        - operator: "Exists"
+          key: node-role.kubernetes.io/master
+          effect: NoSchedule
+      priorityClassName: system-node-critical # Guarantees scheduling for critical system pods
+      containers:
+        - name: csi-attacher
+          image: k8s.gcr.io/sig-storage/csi-attacher:v3.2.0
+          args:
+            - "--v=4"
+            - "--timeout=300s"
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+            - "--leader-election-namespace=vmware-system-csi"
+            - "--kubeconfig=/etc/cloud/kubeconfig/kubeconfig.yaml"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=100"
+          imagePullPolicy: "IfNotPresent"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+            - mountPath: /etc/cloud/kubeconfig
+              name: pvcsi-kubeconfig
+              readOnly: true
+        - name: vsphere-csi-controller
+          image: gcr.io/cloud-provider-vsphere/csi/ci/driver:latest
+          args:
+            - "--supervisor-fss-name=csi-feature-states"
+            - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
+            - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
+            - "--fss-namespace=$(CSI_NAMESPACE)"
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 2112
+              name: prometheus
+              protocol: TCP
+          env:
+            - name: KUBECONFIG
+              value: /etc/cloud/kubeconfig/kubeconfig.yaml
+            - name: CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: CLUSTER_FLAVOR
+              value: "GUEST_CLUSTER"
+            - name: X_CSI_MODE
+              value: "controller"
+            - name: GC_CONFIG
+              value: /etc/cloud/pvcsi-config/cns-csi.conf
+            - name: PROVISION_TIMEOUT_MINUTES
+              value: "4"
+            - name: ATTACHER_TIMEOUT_MINUTES
+              value: "4"
+            - name: RESIZE_TIMEOUT_MINUTES
+              value: "4"
+            - name: LOGGER_LEVEL
+              value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
+            - name: SUPERVISOR_CLIENT_QPS
+              value: "50"
+            - name: SUPERVISOR_CLIENT_BURST
+              value: "50"
+            - name: INCLUSTER_CLIENT_QPS
+              value: "50"
+            - name: INCLUSTER_CLIENT_BURST
+              value: "50"
+            - name: CSI_NAMESPACE
+              value: "vmware-system-csi"
+            - name: X_CSI_SERIAL_VOL_ACCESS_TIMEOUT
+              value: 3m
+          volumeMounts:
+            - mountPath: /etc/cloud/pvcsi-provider
+              name: pvcsi-provider-volume
+              readOnly: true
+            - mountPath: /etc/cloud/pvcsi-config
+              name: pvcsi-config-volume
+              readOnly: true
+            - mountPath: /csi
+              name: socket-dir
+            - mountPath: /etc/cloud/kubeconfig
+              name: pvcsi-kubeconfig
+              readOnly: true
+        - name: vsphere-syncer
+          image: gcr.io/cloud-provider-vsphere/csi/ci/syncer:latest
+          args:
+            - "--leader-election"
+            - "--leader-election-namespace=vmware-system-csi"
+            - "--supervisor-fss-name=csi-feature-states"
+            - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
+            - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
+            - "--fss-namespace=$(CSI_NAMESPACE)"
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 2113
+              name: prometheus
+              protocol: TCP
+          env:
+            - name: KUBECONFIG
+              value: /etc/cloud/kubeconfig/kubeconfig.yaml
+            - name: FULL_SYNC_INTERVAL_MINUTES
+              value: "30"
+            - name: GC_CONFIG
+              value: /etc/cloud/pvcsi-config/cns-csi.conf
+            - name: CLUSTER_FLAVOR
+              value: "GUEST_CLUSTER"
+            - name: LOGGER_LEVEL
+              value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
+            - name: CSI_NAMESPACE
+              value: "vmware-system-csi"
+          volumeMounts:
+            - mountPath: /etc/cloud/pvcsi-provider
+              name: pvcsi-provider-volume
+              readOnly: true
+            - mountPath: /etc/cloud/pvcsi-config
+              name: pvcsi-config-volume
+              readOnly: true
+            - mountPath: /etc/cloud/kubeconfig
+              name: pvcsi-kubeconfig
+              readOnly: true
+        - name: liveness-probe
+          image: quay.io/k8scsi/livenessprobe:v2.2.0
+          args:
+            - "--csi-address=$(ADDRESS)"
+          imagePullPolicy: "IfNotPresent"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+        - name: csi-provisioner
+          image: k8s.gcr.io/sig-storage/csi-provisioner:v2.2.0
+          args:
+            - "--kubeconfig=/etc/cloud/kubeconfig/kubeconfig.yaml"
+            - "--v=4"
+            - "--timeout=300s"
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+            - "--leader-election-namespace=vmware-system-csi"
+            - "--default-fstype=ext4"
+          imagePullPolicy: "IfNotPresent"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+            - mountPath: /etc/cloud/kubeconfig
+              name: pvcsi-kubeconfig
+              readOnly: true
+        - name: csi-resizer
+          image: quay.io/k8scsi/csi-resizer:v1.1.0
+          args:
+            - "--kubeconfig=/etc/cloud/kubeconfig/kubeconfig.yaml"
+            - "--v=4"
+            - "--timeout=300s"
+            - "--handle-volume-inuse-error=false"  # Set this to true if used in vSphere 7.0U1
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+            - "--leader-election-namespace=vmware-system-csi"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=100"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+            - mountPath: /etc/cloud/kubeconfig
+              name: pvcsi-kubeconfig
+              readOnly: true
+      volumes:
+        - name: pvcsi-provider-volume
+          secret:
+            secretName: pvcsi-provider-creds
+        - name: pvcsi-config-volume
+          configMap:
+            name: pvcsi-config
+        - name: socket-dir
+          emptyDir: {}
+        - name: pvcsi-kubeconfig
+          secret:
+            secretName: pvcsi-kubeconfig
