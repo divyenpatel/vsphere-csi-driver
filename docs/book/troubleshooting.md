@@ -32,7 +32,7 @@ The default log level for all the CSI flavors is PRODUCTION. To be able to exami
 ## Procedure to view the logs
 
 ``` sh
-kubectl logs -f <pod-name> -c <container-name> -n <namespace>
+kubectl logs <pod-name> -c <container-name> -n <namespace>
 
 <pod-name> is the name of CSI controller pod
 <container-name> is the name of the container - one of: [csi-provisioner csi-attacher csi-resizer vsphere-csi-controller liveness-probe vsphere-syncer]
