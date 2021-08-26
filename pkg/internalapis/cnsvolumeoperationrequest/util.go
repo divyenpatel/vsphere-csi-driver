@@ -19,7 +19,7 @@ package cnsvolumeoperationrequest
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cnsvolumeoperationrequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
+	cnsvolumeoperationrequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
 )
 
 const (

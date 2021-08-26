@@ -1,4 +1,4 @@
-module sigs.k8s.io/vsphere-csi-driver
+module sigs.k8s.io/vsphere-csi-driver/v2
 
 go 1.16
 
@@ -33,17 +33,17 @@ require (
 	google.golang.org/grpc v1.27.1
 	google.golang.org/protobuf v1.26.0
 	gopkg.in/gcfg.v1 v1.2.3
-	honnef.co/go/tools v0.2.0 // indirect
 	k8s.io/api v0.21.1
 	k8s.io/apiextensions-apiserver v0.21.1
 	k8s.io/apimachinery v0.21.1
-	k8s.io/client-go v0.21.1
+	k8s.io/client-go v11.0.0+incompatible
 	k8s.io/kubectl v0.0.0
 	k8s.io/kubernetes v1.21.1
 	k8s.io/mount-utils v0.21.1
 	k8s.io/sample-controller v0.21.1
 	k8s.io/utils v0.0.0-20210527160623-6fdb442a123b
 	sigs.k8s.io/controller-runtime v0.9.0
+	sigs.k8s.io/vsphere-csi-driver v1.0.3 // indirect
 )
 
 replace (
