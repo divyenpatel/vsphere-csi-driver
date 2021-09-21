@@ -34,13 +34,13 @@ kubectl get secret pvcsi-provider-creds --namespace=vmware-system-csi -o yaml > 
 kubectl get configmap pvcsi-config --namespace=vmware-system-csi -o yaml > gc-pvcsi-config.yaml
 ```
 
-Change namespace in gc-pvcsi-provider-creds-secret.yaml and gc-pvcsi-config.yaml to ns-shoot1
+Change namespace in gc-pvcsi-provider-creds-secret.yaml and gc-pvcsi-config.yaml to ns-shoot1 and create `pvcsi-provider-creds` secret and `pvcsi-config` configmap
 
 ```
-kubectl apply -f gc2-pvcsi-provider-creds-secret.yaml
+kubectl apply -f gc-pvcsi-provider-creds-secret.yaml
 secret/pvcsi-provider-creds created
 
-# kubectl apply -f gc2-pvcsi-config.yaml
+# kubectl apply -f gc-pvcsi-config.yaml
 configmap/pvcsi-config created
 ```
 
