@@ -56,7 +56,12 @@ deps:
 ##                                VERSIONS                                    ##
 ################################################################################
 # Ensure the version is injected into the binaries via a linker flag.
-export VERSION ?= $(shell git log -1 --format=%h)
+VERSION = ""
+ifeq ($(shell git rev-parse --abbrev-ref HEAD), master)
+	VERSION = $(shell git log -1 --format=%h)
+else
+	VERSION = $(shell git describe --dirty --always 2>/dev/null)
+endif
 
 .PHONY: version
 version:
