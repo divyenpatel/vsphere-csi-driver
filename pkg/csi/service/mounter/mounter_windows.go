@@ -25,32 +25,30 @@ import (
 	"strings"
 
 	"github.com/davecgh/go-spew/spew"
-	disk "github.com/kubernetes-csi/csi-proxy/client/api/disk/v1"
-	diskclient "github.com/kubernetes-csi/csi-proxy/client/groups/disk/v1"
+	windowsdiskAPI "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/osutils/windows/disk"
+	windowsfilesystemAPI "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/osutils/windows/filesystem"
+	windowssystemAPI "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/osutils/windows/system"
+	windowsvolumeAPI "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/osutils/windows/volume"
+
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-
-	fs "github.com/kubernetes-csi/csi-proxy/client/api/filesystem/v1"
-	fsclient "github.com/kubernetes-csi/csi-proxy/client/groups/filesystem/v1"
-
-	volume "github.com/kubernetes-csi/csi-proxy/client/api/volume/v1"
-	volumeclient "github.com/kubernetes-csi/csi-proxy/client/groups/volume/v1"
-
-	systemApi "github.com/kubernetes-csi/csi-proxy/client/api/system/v1alpha1"
-	systemClient "github.com/kubernetes-csi/csi-proxy/client/groups/system/v1alpha1"
 
 	"k8s.io/mount-utils"
 	utilexec "k8s.io/utils/exec"
 )
 
 // black assignment is used to check if it can be cast
-var _ CSIProxyMounter = &csiProxyMounter{}
+var _ CSIProxyMounter = &csiWindowsMounter{}
 
-type csiProxyMounter struct {
-	Ctx          context.Context
-	FsClient     *fsclient.Client
-	DiskClient   *diskclient.Client
-	VolumeClient *volumeclient.Client
-	SystemClient *systemClient.Client
+type csiWindowsMounter struct {
+	Ctx   context.Context
+	FSAPI *windowsfilesystemAPI.FilesystemAPI
+	//FsClient     *fsclient.Client
+	DiskAPI *windowsdiskAPI.DiskAPI
+	//DiskClient   *diskclient.Client
+	VolumeAPI *windowsvolumeAPI.VolumeAPI
+	//VolumeClient *volumeclient.Client
+	SystemAPI *windowssystemAPI.APIImplementor
+	//SystemClient *systemClient.Client
 }
 
 // CSIProxyMounter extends the mount.Interface interface with CSI Proxy methods.
@@ -73,8 +71,6 @@ type CSIProxyMounter interface {
 	GetVolumeSizeInBytes(devicePath string) (int64, error)
 	// ResizeVolume resizes the volume to the maximum available size.
 	ResizeVolume(devicePath string, sizeInBytes int64) error
-	// GetAPIVersions returns the versions of the client APIs this mounter is using.
-	GetAPIVersions() string
 	// Gets windows specific disk number from diskId
 	GetDiskNumber(diskID string) (string, error)
 	// Get the size of the disk in bytes
@@ -87,12 +83,12 @@ type CSIProxyMounter interface {
 
 // NewSafeMounter returns mounter with exec
 func NewSafeMounter(ctx context.Context) (*mount.SafeFormatAndMount, error) {
-	csiProxyMounter, err := newCSIProxyMounter(ctx)
+	csiWindowsMounter, err := newCSIProxyMounter(ctx)
 	log := logger.GetLogger(ctx)
 	if err == nil {
-		log.Infof("using CSIProxyMounterV1, %s", csiProxyMounter.GetAPIVersions())
+		log.Infof("using csiWindowsMounter")
 		return &mount.SafeFormatAndMount{
-			Interface: csiProxyMounter,
+			Interface: csiWindowsMounter,
 			Exec:      utilexec.New(),
 		}, nil
 	}
@@ -101,41 +97,38 @@ func NewSafeMounter(ctx context.Context) (*mount.SafeFormatAndMount, error) {
 
 // newCSIProxyMounter - creates a new CSI Proxy mounter struct which encompassed all the
 // clients to the CSI proxy - filesystem, disk and volume clients.
-func newCSIProxyMounter(ctx context.Context) (*csiProxyMounter, error) {
-	fsClient, err := fsclient.NewClient()
-	if err != nil {
-		return nil, err
-	}
-	diskClient, err := diskclient.NewClient()
-	if err != nil {
-		return nil, err
-	}
-	volumeClient, err := volumeclient.NewClient()
-	if err != nil {
-		return nil, err
-	}
-	systemClient, err := systemClient.NewClient()
-	if err != nil {
-		return nil, err
-	}
-	return &csiProxyMounter{
-		FsClient:     fsClient,
-		DiskClient:   diskClient,
-		VolumeClient: volumeClient,
-		SystemClient: systemClient,
-		Ctx:          ctx,
-	}, nil
-}
+func newCSIProxyMounter(ctx context.Context) (*csiWindowsMounter, error) {
+	fsAPI := windowsfilesystemAPI.FilesystemAPI{}
+	//fsClient, err := fsclient.NewClient()
+	//if err != nil {
+	//	return nil, err
+	//}
+	diskAPI := windowsdiskAPI.DiskAPI{}
+	//diskClient, err := diskclient.NewClient()
+	//if err != nil {
+	//	return nil, err
+	//}
 
-// GetAPIVersions returns the versions of the client APIs this mounter is using.
-func (mounter *csiProxyMounter) GetAPIVersions() string {
-	return fmt.Sprintf(
-		"API Versions filesystem: %s, disk: %s, volume: %s, system: %s",
-		fsclient.Version,
-		diskclient.Version,
-		volumeclient.Version,
-		systemClient.Version,
-	)
+	volumeAPI := windowsvolumeAPI.VolumeAPI{}
+
+	//volumeClient, err := volumeclient.NewClient()
+	//if err != nil {
+	//	return nil, err
+	//}
+
+	systemAPI := windowssystemAPI.New()
+
+	//systemClient, err := systemClient.NewClient()
+	//if err != nil {
+	//	return nil, err
+	//}
+	return &csiWindowsMounter{
+		FSAPI:     &fsAPI,
+		DiskAPI:   &diskAPI,
+		VolumeAPI: &volumeAPI,
+		SystemAPI: &systemAPI,
+		Ctx:       ctx,
+	}, nil
 }
 
 // normalizeWindowsPath normalizes windows path
@@ -148,27 +141,20 @@ func normalizeWindowsPath(path string) string {
 }
 
 // ExistsPath - Checks if a path exists. This call does not perform follow link.
-func (mounter *csiProxyMounter) ExistsPath(path string) (bool, error) {
+func (mounter *csiWindowsMounter) ExistsPath(path string) (bool, error) {
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
-	isExistsResponse, err := mounter.FsClient.PathExists(context.Background(),
-		&fs.PathExistsRequest{
-			Path: normalizeWindowsPath(path),
-		})
+	isExists, err := mounter.FSAPI.PathExists(normalizeWindowsPath(path))
 	if err != nil {
 		log.Errorf("Proxy returned error while checking if PathExists: %v", err)
 		return false, err
 	}
-	return isExistsResponse.Exists, err
+	return isExists, err
 }
 
 // Rmdir - delete the given directory
-func (mounter *csiProxyMounter) Rmdir(path string) error {
-	rmdirRequest := &fs.RmdirRequest{
-		Path:  normalizeWindowsPath(path),
-		Force: true,
-	}
-	_, err := mounter.FsClient.Rmdir(context.Background(), rmdirRequest)
+func (mounter *csiWindowsMounter) Rmdir(path string) error {
+	err := mounter.FSAPI.Rmdir(normalizeWindowsPath(path), true)
 	if err != nil {
 		return err
 	}
@@ -176,13 +162,10 @@ func (mounter *csiProxyMounter) Rmdir(path string) error {
 }
 
 // MakeDir - Creates a directory.
-func (mounter *csiProxyMounter) MakeDir(pathname string) error {
+func (mounter *csiWindowsMounter) MakeDir(pathname string) error {
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
-	mkdirReq := &fs.MkdirRequest{
-		Path: normalizeWindowsPath(pathname),
-	}
-	_, err := mounter.FsClient.Mkdir(context.Background(), mkdirReq)
+	err := mounter.FSAPI.Mkdir(normalizeWindowsPath(pathname))
 	if err != nil {
 		log.Infof("Error: %v", err)
 		return err
@@ -191,20 +174,19 @@ func (mounter *csiProxyMounter) MakeDir(pathname string) error {
 }
 
 // Gets windows specific disk number from diskId
-func (mounter *csiProxyMounter) GetDiskNumber(diskID string) (string, error) {
+func (mounter *csiWindowsMounter) GetDiskNumber(diskID string) (string, error) {
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
 	// Check device is attached
 	log.Debug("GetDiskNumber called with diskID: %q", diskID)
 
-	listRequest := &disk.ListDiskIDsRequest{}
-	diskIDsResponse, err := mounter.DiskClient.ListDiskIDs(context.Background(), listRequest)
+	diskIDs, err := mounter.DiskAPI.ListDiskIDs()
 	if err != nil {
 		log.Debug("Could not get diskids %s", err)
 		return "", err
 	}
-	spew.Dump("disIDs: ", diskIDsResponse)
-	for diskNum, diskInfo := range diskIDsResponse.GetDiskIDs() {
+	spew.Dump("disIDs: ", diskIDs)
+	for diskNum, diskInfo := range diskIDs {
 		log.Infof("found disk number %d, disk info %v", diskNum, diskInfo)
 		ID := diskInfo.Page83
 		if ID == "" {
@@ -221,7 +203,7 @@ func (mounter *csiProxyMounter) GetDiskNumber(diskID string) (string, error) {
 // IsLikelyMountPoint - If the directory does not exists, the function will return os.ErrNotExist error.
 // If the path exists, call to CSI proxy will check if its a link, if its a link then existence of target
 // path is checked.
-func (mounter *csiProxyMounter) IsLikelyNotMountPoint(path string) (bool, error) {
+func (mounter *csiWindowsMounter) IsLikelyNotMountPoint(path string) (bool, error) {
 	isExists, err := mounter.ExistsPath(path)
 	if err != nil {
 		return false, err
@@ -231,19 +213,16 @@ func (mounter *csiProxyMounter) IsLikelyNotMountPoint(path string) (bool, error)
 		return true, os.ErrNotExist
 	}
 
-	response, err := mounter.FsClient.IsSymlink(context.Background(),
-		&fs.IsSymlinkRequest{
-			Path: normalizeWindowsPath(path),
-		})
+	isSymlink, err := mounter.FSAPI.IsSymlink(normalizeWindowsPath(path))
 	if err != nil {
 		return false, err
 	}
-	return !response.IsSymlink, nil
+	return !isSymlink, nil
 	//TODO check if formatted else error out
 }
 
 // FormatAndMount - accepts the source disk number, target path to mount, the fstype to format with and options to be used.
-func (mounter *csiProxyMounter) FormatAndMount(source string, target string, fstype string, options []string) error {
+func (mounter *csiWindowsMounter) FormatAndMount(source string, target string, fstype string, options []string) error {
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
 	diskNum, err := strconv.Atoi(source)
@@ -251,76 +230,54 @@ func (mounter *csiProxyMounter) FormatAndMount(source string, target string, fst
 		return fmt.Errorf("parse %s failed with error: %v", source, err)
 	}
 	log.Infof("Disk Number: %d", diskNum)
-	// Call PartitionDisk CSI proxy call to partition the disk and return the volume id
-	partionDiskRequest := &disk.PartitionDiskRequest{
-		DiskNumber: uint32(diskNum),
-	}
-	if _, err = mounter.DiskClient.PartitionDisk(context.Background(), partionDiskRequest); err != nil {
+
+	if err = mounter.DiskAPI.CreateBasicPartition(uint32(diskNum)); err != nil {
 		return err
 	}
 
 	// ensure disk is online
 	log.Infof("setting disk %d to online", diskNum)
-	attachRequest := &disk.SetDiskStateRequest{
-		DiskNumber: uint32(diskNum),
-		IsOnline:   true,
-	}
-	_, err = mounter.DiskClient.SetDiskState(context.Background(), attachRequest)
+	err = mounter.DiskAPI.SetDiskState(uint32(diskNum), true)
 	if err != nil {
 		return err
 	}
 
 	// List the volumes on the given disk.
-	volumeIDsRequest := &volume.ListVolumesOnDiskRequest{
-		DiskNumber: uint32(diskNum),
-	}
-	volumeIdResponse, err := mounter.VolumeClient.ListVolumesOnDisk(context.Background(), volumeIDsRequest)
+	volumeIds, err := mounter.VolumeAPI.ListVolumesOnDisk(uint32(diskNum), 0)
 	if err != nil {
 		return err
 	}
 
 	// TODO: consider partitions and choose the right partition.
 	// For now just choose the first volume.
-	volumeID := volumeIdResponse.VolumeIds[0]
-	log.Infof("volumeIdResponse : %v", volumeIdResponse)
+	volumeID := volumeIds[0]
+	log.Infof("volumeIdResponse : %v", volumeIds)
 	log.Infof("volumeID : %s", volumeID)
 	// Check if the volume is formatted.
-	isVolumeFormattedRequest := &volume.IsVolumeFormattedRequest{
-		VolumeId: volumeID,
-	}
-	isVolumeFormattedResponse, err := mounter.VolumeClient.IsVolumeFormatted(context.Background(), isVolumeFormattedRequest)
+	isVolumeFormatted, err := mounter.VolumeAPI.IsVolumeFormatted(volumeID)
 	if err != nil {
 		return err
 	}
 
 	// If the volume is not formatted, then format it, else proceed to mount.
-	if !isVolumeFormattedResponse.Formatted {
+	if !isVolumeFormatted {
 		log.Infof("volumeID is not formatted : %s", volumeID)
-		formatVolumeRequest := &volume.FormatVolumeRequest{
-			VolumeId: volumeID,
-			// TODO: Accept the filesystem and other options
-		}
-		_, err = mounter.VolumeClient.FormatVolume(context.Background(), formatVolumeRequest)
+		err = mounter.VolumeAPI.FormatVolume(volumeID)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Mount the volume by calling the CSI proxy call.
-	mountVolumeRequest := &volume.MountVolumeRequest{
-		VolumeId:   volumeID,
-		TargetPath: normalizeWindowsPath(target),
-	}
-	_, err = mounter.VolumeClient.MountVolume(context.Background(), mountVolumeRequest)
-	log.Debug("Volume mounted")
+	err = mounter.VolumeAPI.MountVolume(volumeID, normalizeWindowsPath(target))
 	if err != nil {
 		return err
 	}
+	log.Infof("Volume mounted")
 	return nil
 }
 
 // Unmount - Removes the directory - equivalent to unmount on Linux.
-func (mounter *csiProxyMounter) Unmount(target string) error {
+func (mounter *csiWindowsMounter) Unmount(target string) error {
 	// unmount internally calls WriteVolumeCache so no need to WriteVolumeCache
 	// normalize target path
 	target = normalizeWindowsPath(target)
@@ -328,21 +285,13 @@ func (mounter *csiProxyMounter) Unmount(target string) error {
 		return err
 	}
 	// get volume id
-	idRequest := &volume.GetVolumeIDFromTargetPathRequest{
-		TargetPath: target,
-	}
-	idResponse, err := mounter.VolumeClient.GetVolumeIDFromTargetPath(context.Background(), idRequest)
+	volumeId, err := mounter.VolumeAPI.GetVolumeIDFromTargetPath(target)
 	if err != nil {
 		return err
 	}
-	volumeId := idResponse.GetVolumeId()
 
 	// unmount volume
-	unmountRequest := &volume.UnmountVolumeRequest{
-		TargetPath: target,
-		VolumeId:   volumeId,
-	}
-	_, err = mounter.VolumeClient.UnmountVolume(context.Background(), unmountRequest)
+	err = mounter.VolumeAPI.UnmountVolume(volumeId, target)
 	if err != nil {
 		return err
 	}
@@ -354,33 +303,21 @@ func (mounter *csiProxyMounter) Unmount(target string) error {
 	}
 
 	// Set disk to offline mode to have a clean state
-	getDiskNumberRequest := &volume.GetDiskNumberFromVolumeIDRequest{
-		VolumeId: volumeId,
-	}
-	getDiskNumberResponse, err := mounter.VolumeClient.GetDiskNumberFromVolumeID(context.Background(), getDiskNumberRequest)
+	diskNumber, err := mounter.VolumeAPI.GetDiskNumberFromVolumeID(volumeId)
 	if err != nil {
 		return err
 	}
-	diskNumber := getDiskNumberResponse.GetDiskNumber()
-	setDiskStateRequest := &disk.SetDiskStateRequest{
-		DiskNumber: diskNumber,
-		IsOnline:   false,
-	}
-	if _, err = mounter.DiskClient.SetDiskState(context.Background(), setDiskStateRequest); err != nil {
+	if err = mounter.DiskAPI.SetDiskState(diskNumber, false); err != nil {
 		return err
 	}
 	return nil
 }
 
 // Mount just creates a soft link at target pointing to source.
-func (mounter *csiProxyMounter) Mount(source string, target string, fstype string, options []string) error {
+func (mounter *csiWindowsMounter) Mount(source string, target string, fstype string, options []string) error {
 	// Mount is called after the format is done.
 	// TODO: Confirm that fstype is empty.
-	linkRequest := &fs.CreateSymlinkRequest{
-		SourcePath: normalizeWindowsPath(source),
-		TargetPath: normalizeWindowsPath(target),
-	}
-	_, err := mounter.FsClient.CreateSymlink(context.Background(), linkRequest)
+	err := mounter.FSAPI.CreateSymlink(normalizeWindowsPath(source), normalizeWindowsPath(target))
 	if err != nil {
 		return err
 	}
@@ -388,145 +325,117 @@ func (mounter *csiProxyMounter) Mount(source string, target string, fstype strin
 }
 
 // GetDeviceNameFromMount returns the volume ID for a mount path.
-func (mounter *csiProxyMounter) GetDeviceNameFromMount(mountPath string) (string, error) {
+func (mounter *csiWindowsMounter) GetDeviceNameFromMount(mountPath string) (string, error) {
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
-	req := &volume.GetVolumeIDFromTargetPathRequest{TargetPath: normalizeWindowsPath(mountPath)}
-	resp, err := mounter.VolumeClient.GetVolumeIDFromTargetPath(context.Background(), req)
+	volumeID, err := mounter.VolumeAPI.GetVolumeIDFromTargetPath(normalizeWindowsPath(mountPath))
 	if err != nil {
 		return "", err
 	}
-	log.Infof("Device path for mount Path: %s: %s", mountPath, resp.VolumeId)
-	return resp.VolumeId, nil
+	log.Infof("Device path for mount Path: %s: %s", mountPath, volumeID)
+	return volumeID, nil
 }
 
 // ResizeVolume resizes the volume to the maximum available size.
 // sizeInBytes is ignored in this function as windows is not resizing to full capacity
-func (mounter *csiProxyMounter) ResizeVolume(devicePath string, sizeInBytes int64) error {
+func (mounter *csiWindowsMounter) ResizeVolume(devicePath string, sizeInBytes int64) error {
 	// Set disk to online mode before resize
-	getDiskNumberRequest := &volume.GetDiskNumberFromVolumeIDRequest{
-		VolumeId: devicePath, // here devicePath is Device.RealDev which is Volume ID for Windows
-	}
-	getDiskNumberResponse, err := mounter.VolumeClient.GetDiskNumberFromVolumeID(context.Background(), getDiskNumberRequest)
+	diskNumber, err := mounter.VolumeAPI.GetDiskNumberFromVolumeID(devicePath)
 	if err != nil {
 		return err
 	}
-	diskNumber := getDiskNumberResponse.GetDiskNumber()
-	setDiskStateRequest := &disk.SetDiskStateRequest{
-		DiskNumber: diskNumber,
-		IsOnline:   true,
-	}
-	if _, err = mounter.DiskClient.SetDiskState(context.Background(), setDiskStateRequest); err != nil {
+	if err = mounter.DiskAPI.SetDiskState(diskNumber, true); err != nil {
 		return err
 	}
-
-	req := &volume.ResizeVolumeRequest{VolumeId: devicePath, SizeBytes: 0}
-	_, err = mounter.VolumeClient.ResizeVolume(context.Background(), req)
+	err = mounter.VolumeAPI.ResizeVolume(devicePath, 0)
 	return err
 }
 
 // Get the size in bytes for Volume
-func (mounter *csiProxyMounter) GetVolumeSizeInBytes(volumeId string) (int64, error) {
-	req := &volume.GetVolumeStatsRequest{VolumeId: volumeId}
-	resp, err := mounter.VolumeClient.GetVolumeStats(context.Background(), req)
+func (mounter *csiWindowsMounter) GetVolumeSizeInBytes(volumeId string) (int64, error) {
+	volumeSize, _, err := mounter.VolumeAPI.GetVolumeStats(volumeId)
 	if err != nil {
 		return -1, err
 	}
-	return resp.TotalBytes, nil
+	return volumeSize, nil
 }
 
 // Rescan would trigger an update storage cache via the CSI proxy.
-func (mounter *csiProxyMounter) Rescan() error {
+func (mounter *csiWindowsMounter) Rescan() error {
 	// Call Rescan from disk APIs of CSI Proxy.
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
 	log.Infof("Calling CSI Proxy's rescan API")
-	if _, err := mounter.DiskClient.Rescan(context.Background(), &disk.RescanRequest{}); err != nil {
+	if err := mounter.DiskAPI.Rescan(); err != nil {
 		return err
 	}
 	return nil
 }
 
 // Get the size of the disk in bytes
-func (mounter *csiProxyMounter) GetDiskTotalBytes(volumeId string) (int64, error) {
-	getDiskNumberRequest := &volume.GetDiskNumberFromVolumeIDRequest{
-		VolumeId: volumeId,
-	}
-	getDiskNumberResponse, err := mounter.VolumeClient.GetDiskNumberFromVolumeID(context.Background(), getDiskNumberRequest)
+func (mounter *csiWindowsMounter) GetDiskTotalBytes(volumeId string) (int64, error) {
+	diskNumber, err := mounter.VolumeAPI.GetDiskNumberFromVolumeID(volumeId)
 	if err != nil {
 		return -1, err
 	}
-	diskNumber := getDiskNumberResponse.GetDiskNumber()
 
-	DiskStatsResponse, err := mounter.DiskClient.GetDiskStats(context.Background(),
-		&disk.GetDiskStatsRequest{
-			DiskNumber: diskNumber,
-		})
-	return DiskStatsResponse.TotalBytes, err
+	totalBytes, err := mounter.DiskAPI.GetDiskStats(diskNumber)
+	return totalBytes, err
 }
 
 // StatFS returns info about volume
-func (mounter *csiProxyMounter) StatFS(path string) (available, capacity, used, inodesFree, inodes, inodesUsed int64, err error) {
+func (mounter *csiWindowsMounter) StatFS(path string) (available, capacity, used, inodesFree, inodes, inodesUsed int64, err error) {
 	zero := int64(0)
 
-	idRequest := &volume.GetVolumeIDFromTargetPathRequest{
-		TargetPath: path,
-	}
-	idResponse, err := mounter.VolumeClient.GetVolumeIDFromTargetPath(context.Background(), idRequest)
+	volumeID, err := mounter.VolumeAPI.GetVolumeIDFromTargetPath(path)
 	if err != nil {
 		return zero, zero, zero, zero, zero, zero, err
 	}
-	volumeID := idResponse.GetVolumeId()
 
-	request := &volume.GetVolumeStatsRequest{
-		VolumeId: volumeID,
-	}
-	response, err := mounter.VolumeClient.GetVolumeStats(context.Background(), request)
+	volumeSize, volumeUsedSize, err := mounter.VolumeAPI.GetVolumeStats(volumeID)
 	if err != nil {
 		return zero, zero, zero, zero, zero, zero, err
 	}
-	capacity = response.GetTotalBytes()
-	used = response.GetUsedBytes()
+	capacity = volumeSize
+	used = volumeUsedSize
 	available = capacity - used
 	return available, capacity, used, zero, zero, zero, nil
 }
 
 // umimplemented methods of mount.Interface
-func (mounter *csiProxyMounter) GetMountRefs(pathname string) ([]string, error) {
+func (mounter *csiWindowsMounter) GetMountRefs(pathname string) ([]string, error) {
 	return []string{}, fmt.Errorf("GetMountRefs is not implemented for csiProxyMounter")
 }
 
-func (mounter *csiProxyMounter) GetFSGroup(pathname string) (int64, error) {
+func (mounter *csiWindowsMounter) GetFSGroup(pathname string) (int64, error) {
 	return -1, fmt.Errorf("GetFSGroup is not implemented for csiProxyMounter")
 }
 
-func (mounter *csiProxyMounter) MountSensitive(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
+func (mounter *csiWindowsMounter) MountSensitive(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
 	return fmt.Errorf("MountSensitive is not implemented for csiProxyMounter")
 }
 
-func (mounter *csiProxyMounter) MountSensitiveWithoutSystemd(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
+func (mounter *csiWindowsMounter) MountSensitiveWithoutSystemd(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
 	return fmt.Errorf("MountSensitiveWithoutSystemd is not implemented for csiProxyMounter")
 }
 
-func (mounter *csiProxyMounter) MountSensitiveWithoutSystemdWithMountFlags(source string, target string, fstype string, options []string, sensitiveOptions []string, mountFlags []string) error {
+func (mounter *csiWindowsMounter) MountSensitiveWithoutSystemdWithMountFlags(source string, target string, fstype string, options []string, sensitiveOptions []string, mountFlags []string) error {
 	return mounter.MountSensitive(source, target, fstype, options, sensitiveOptions /* sensitiveOptions */)
 }
 
-func (mounter *csiProxyMounter) List() ([]mount.MountPoint, error) {
+func (mounter *csiWindowsMounter) List() ([]mount.MountPoint, error) {
 	return []mount.MountPoint{}, fmt.Errorf("List not implemented for csiProxyMounter")
 }
 
 // GetBIOSSerialNumber - Get bios serial number
-func (mounter *csiProxyMounter) GetBIOSSerialNumber() (string, error) {
+func (mounter *csiWindowsMounter) GetBIOSSerialNumber() (string, error) {
 	ctx := mounter.Ctx
 	log := logger.GetLogger(ctx)
 
-	serialNoResponse, err := mounter.SystemClient.GetBIOSSerialNumber(context.Background(),
-		&systemApi.GetBIOSSerialNumberRequest{},
-	)
+	serialNo, err := mounter.SystemAPI.GetBIOSSerialNumber()
 	if err != nil {
 		log.Errorf("Proxy returned error while checking serialNoResponse: %v", err)
 		return "", err
 	}
-	return serialNoResponse.GetSerialNumber(), err
+	return serialNo, err
 }

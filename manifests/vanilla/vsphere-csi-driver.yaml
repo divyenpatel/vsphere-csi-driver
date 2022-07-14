@@ -267,7 +267,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.6.0-rc.4
+          image: harbor-repo.vmware.com/csi/driver-divyendriver:latest
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -323,7 +323,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: vsphere-syncer
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.6.0-rc.4
+          image: harbor-repo.vmware.com/csi/driver-divyensyncer:latest
           args:
             - "--leader-election"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
@@ -442,7 +442,7 @@ spec:
               - --mode=kubelet-registration-probe
             initialDelaySeconds: 3
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.6.0-rc.4
+          image: harbor-repo.vmware.com/csi/driver-divyendriver:latest
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -558,12 +558,33 @@ spec:
         app: vsphere-csi-node-windows
         role: vsphere-csi-windows
     spec:
+      priorityClassName: system-node-critical
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      hostNetwork: true
       nodeSelector:
         kubernetes.io/os: windows
       serviceAccountName: vsphere-csi-node
+      initContainers:
+        - name: init
+          image: harbor-repo.vmware.com/csi/driver-divyendriver:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - "powershell.exe"
+            - "-c"
+            - "New-Item"
+            - "-ItemType"
+            - "Directory"
+            - "-Path"
+            - "C:\\var\\lib\\kubelet\\plugins\\csi.vsphere.vmware.com\\"
+            - "-Force"
       containers:
         - name: node-driver-registrar
           image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.5.0
+          command:
+            - "csi-node-driver-registrar.exe"
           args:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
@@ -584,9 +605,12 @@ spec:
               - /csi-node-driver-registrar.exe
               - --kubelet-registration-path=C:\\var\\lib\\kubelet\\plugins\\csi.vsphere.vmware.com\\csi.sock
               - --mode=kubelet-registration-probe
-            initialDelaySeconds: 3
+            initialDelaySeconds: 60
+            timeoutSeconds: 30
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.6.0-rc.4
+          image: harbor-repo.vmware.com/csi/driver-divyendriver:latest
+          command:
+            - "csi.exe"
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -617,19 +641,6 @@ spec:
                   fieldPath: metadata.namespace
             - name: NODEGETINFO_WATCH_TIMEOUT_MINUTES
               value: "1"
-          volumeMounts:
-            - name: plugin-dir
-              mountPath: 'C:\csi'
-            - name: pods-mount-dir
-              mountPath: 'C:\var\lib\kubelet'   
-            - name: csi-proxy-volume-v1
-              mountPath: \\.\pipe\csi-proxy-volume-v1
-            - name: csi-proxy-filesystem-v1
-              mountPath: \\.\pipe\csi-proxy-filesystem-v1
-            - name: csi-proxy-disk-v1
-              mountPath: \\.\pipe\csi-proxy-disk-v1    
-            - name: csi-proxy-system-v1alpha1
-              mountPath: \\.\pipe\csi-proxy-system-v1alpha1
           ports:
             - name: healthz
               containerPort: 9808
@@ -644,6 +655,8 @@ spec:
             failureThreshold: 3
         - name: liveness-probe
           image: k8s.gcr.io/sig-storage/livenessprobe:v2.6.0
+          command:
+            - "livenessprobe.exe"
           args:
             - "--v=4"
             - "--csi-address=/csi/csi.sock"
@@ -659,26 +672,6 @@ spec:
           hostPath:
             path: 'C:\var\lib\kubelet\plugins\csi.vsphere.vmware.com\'
             type: DirectoryOrCreate
-        - name: pods-mount-dir
-          hostPath:
-            path: \var\lib\kubelet
-            type: Directory
-        - name: csi-proxy-disk-v1
-          hostPath:
-            path: \\.\pipe\csi-proxy-disk-v1
-            type: ''
-        - name: csi-proxy-volume-v1
-          hostPath:
-            path: \\.\pipe\csi-proxy-volume-v1
-            type: ''
-        - name: csi-proxy-filesystem-v1
-          hostPath:
-            path: \\.\pipe\csi-proxy-filesystem-v1
-            type: ''
-        - name: csi-proxy-system-v1alpha1
-          hostPath:
-            path: \\.\pipe\csi-proxy-system-v1alpha1
-            type: ''
       tolerations:
         - effect: NoExecute
           operator: Exists

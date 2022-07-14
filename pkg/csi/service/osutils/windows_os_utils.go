@@ -36,7 +36,8 @@ import (
 )
 
 const (
-	UUIDPrefix = "VMware-"
+	UUIDPrefix           = "VMware-"
+	MaxPathLengthWindows = 260
 )
 
 // NewOsUtils creates OsUtils with a linux specific mounter
