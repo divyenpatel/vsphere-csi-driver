@@ -27,6 +27,7 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/fsnotify/fsnotify"
+	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/object"
@@ -36,7 +37,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/migration"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/node"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
@@ -1936,8 +1936,32 @@ func (c *controller) GetCapacity(ctx context.Context, req *csi.GetCapacityReques
 	*csi.GetCapacityResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
+	var availableCapacity int64
+	var maxvolumesize int64
 	log.Infof("GetCapacity: called with args %+v", *req)
-	return nil, logger.LogNewErrorCode(log, codes.Unimplemented, "getCapacity")
+	// Get VC instance.
+	vCenter, err := common.GetVCenter(ctx, c.manager)
+	// TODO: Need to extract fault from err returned by GetVirtualCenter.
+	// Currently, just return "csi.fault.Internal".
+	if err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to get vCenter from Manager. Error: %v", err)
+	}
+
+	if req.AccessibleTopology != nil {
+		storagepolicyname := req.Parameters["storagepolicyname"]
+		availableCapacity, maxvolumesize, err = c.topologyMgr.GetStorageCapacityInTopology(ctx,
+			req.AccessibleTopology, storagepolicyname, vCenter)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get stroage capacity for AccessibleTopology: %+v. Error: %v", req.AccessibleTopology, err)
+		}
+	}
+	resp := &csi.GetCapacityResponse{
+		AvailableCapacity: availableCapacity,
+		MaximumVolumeSize: &wrappers.Int64Value{Value: maxvolumesize},
+	}
+	return resp, nil
 }
 
 // initVolumeMigrationService is a helper method to initialize

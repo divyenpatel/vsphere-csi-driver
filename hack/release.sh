@@ -22,7 +22,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-DO_WINDOWS_BUILD=${DO_WINDOWS_BUILD_ENV:-true}
+DO_WINDOWS_BUILD=${DO_WINDOWS_BUILD_ENV:-false}
 
 # BASE_REPO is the root path of the image repository
 readonly BASE_IMAGE_REPO=gcr.io/cloud-provider-vsphere

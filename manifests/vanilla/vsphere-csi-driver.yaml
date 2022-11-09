@@ -5,6 +5,7 @@ metadata:
 spec:
   attachRequired: true
   podInfoOnMount: false
+  StorageCapacity: true
 ---
 kind: ServiceAccount
 apiVersion: v1
@@ -77,6 +78,9 @@ rules:
   - apiGroups: [ "cns.vmware.com" ]
     resources: [ "csinodetopologies" ]
     verbs: ["get", "update", "watch", "list"]
+  - apiGroups: [ "storage.k8s.io" ]
+    resources: [ "csistoragecapacities" ]
+    verbs: [ "create", "get", "list", "watch", "update", "delete", "patch"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -371,6 +375,8 @@ spec:
             - "--kube-api-burst=100"
             - "--leader-election"
             - "--default-fstype=ext4"
+            - "--enable-capacity=true"
+            - "--capacity-ownerref-level=-1"
             # needed only for topology aware setup
             #- "--feature-gates=Topology=true"
             #- "--strict-topology"

@@ -100,6 +100,9 @@ type ControllerTopologyService interface {
 	// GetTopologyInfoFromNodes retrieves the topology information of the nodes after the datastore has been
 	// selected for volume provisioning.
 	GetTopologyInfoFromNodes(ctx context.Context, retrieveTopologyInfoParams interface{}) ([]map[string]string, error)
+
+	GetStorageCapacityInTopology(ctx context.Context,
+		accessibleTopology *csi.Topology, storagepolicyname string, vCenter *cnsvsphere.VirtualCenter) (int64, int64, error)
 }
 
 // NodeTopologyService is an interface which exposes functionality related to

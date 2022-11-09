@@ -906,6 +906,137 @@ func (volTopology *controllerVolumeTopology) GetSharedDatastoresInTopology(ctx c
 	return sharedDatastores, nil
 }
 
+// GetStorageCapacityInTopology returns total storage capacity available and maximum volume size for the datastores
+// in a given accessibleTopology
+func (volTopology *controllerVolumeTopology) GetStorageCapacityInTopology(ctx context.Context,
+	accessibleTopology *csi.Topology, storagepolicyname string, vCenter *cnsvsphere.VirtualCenter) (int64, int64, error) {
+	log := logger.GetLogger(ctx)
+	log.Infof("GetStorageCapacityInTopology is called with accessibleTopology: %+v "+
+		"and storagepolicy: %v", *accessibleTopology, storagepolicyname)
+	var sharedDatastores []*cnsvsphere.DatastoreInfo
+	// A topology requirement is an array of topology segments.
+	segments := accessibleTopology.GetSegments()
+	var (
+		err                      error
+		matchingNodeVMs          []*cnsvsphere.VirtualMachine
+		completeTopologySegments []map[string]string
+	)
+	// Fetch nodes with topology labels matching the topology segments.
+	log.Debugf("Getting list of nodeVMs for topology segments %+v", segments)
+	matchingNodeVMs, completeTopologySegments, err = volTopology.getTopologySegmentsWithMatchingNodes(ctx,
+		segments)
+	if err != nil {
+		log.Errorf("failed to find nodes in topology segment %+v. Error: %+v", segments, err)
+		return 0, 0, err
+	}
+	if len(matchingNodeVMs) == 0 {
+		return 0, 0, logger.LogNewErrorf(log, "No nodes in the cluster matched the topology requirement provided: %+v",
+			segments)
+	}
+
+	// Fetch shared datastores for the matching nodeVMs.
+	log.Infof("Obtained list of nodeVMs %+v", matchingNodeVMs)
+	sharedDatastoresInTopology, err := cnsvsphere.GetSharedDatastoresForVMs(ctx, matchingNodeVMs)
+	if err != nil {
+		log.Errorf("Failed to get shared datastores for nodes: %+v in topology segment %+v. Error: %+v",
+			matchingNodeVMs, segments, err)
+		return 0, 0, err
+	}
+
+	// If applicable, filter the shared datastores with the preferred datastores for that segment.
+
+	// If storage policy name is mentioned in storage class, check for
+	// datastore compatibility before proceeding with preferred datastores.
+	if storagepolicyname != "" {
+		storagePolicyID, err := vCenter.GetStoragePolicyIDByName(ctx, storagepolicyname)
+		if err != nil {
+			return 0, 0, logger.LogNewErrorf(log, "Error occurred while getting Profile Id "+
+				"from Storage Profile Name: %s. Error: %+v", storagepolicyname, err)
+		}
+		// Check storage policy compatibility.
+		var sharedDSMoRef []vimtypes.ManagedObjectReference
+		for _, ds := range sharedDatastoresInTopology {
+			sharedDSMoRef = append(sharedDSMoRef, ds.Reference())
+		}
+		compat, err := vCenter.PbmCheckCompatibility(ctx, sharedDSMoRef, storagePolicyID)
+		if err != nil {
+			return 0, 0, logger.LogNewErrorf(log, "failed to find datastore compatibility "+
+				"with storage policy ID %q. Error: %+v", storagePolicyID, err)
+		}
+		compatibleDsMoids := make(map[string]struct{})
+		for _, ds := range compat.CompatibleDatastores() {
+			compatibleDsMoids[ds.HubId] = struct{}{}
+		}
+		log.Infof("Datastores compatible with storage policy %q are %+v", storagepolicyname,
+			compatibleDsMoids)
+
+		// Filter compatible datastores from shared datastores list.
+		var compatibleDatastores []*cnsvsphere.DatastoreInfo
+		for _, ds := range sharedDatastoresInTopology {
+			if _, exists := compatibleDsMoids[ds.Reference().Value]; exists {
+				compatibleDatastores = append(compatibleDatastores, ds)
+			}
+		}
+		if len(compatibleDatastores) == 0 {
+			return 0, 0, logger.LogNewErrorf(log, "No compatible shared datastores found "+
+				"for storage policy %q", storagepolicyname)
+		}
+		sharedDatastoresInTopology = compatibleDatastores
+	}
+
+	// Fetch all preferred datastore URLs for the matching topology segments.
+	allPreferredDSURLs := make(map[string]struct{})
+	for _, topoSegs := range completeTopologySegments {
+		prefDS := getPreferredDatastoresInSegments(ctx, topoSegs)
+		for key, val := range prefDS {
+			allPreferredDSURLs[key] = val
+		}
+	}
+	if len(allPreferredDSURLs) != 0 {
+		// If there are preferred datastores among the compatible
+		// datastores, choose the preferred datastores, otherwise
+		// choose the compatible datastores.
+		var preferredDS []*cnsvsphere.DatastoreInfo
+		for _, dsInfo := range sharedDatastoresInTopology {
+			if _, ok := allPreferredDSURLs[dsInfo.Info.Url]; ok {
+				preferredDS = append(preferredDS, dsInfo)
+			}
+		}
+		if len(preferredDS) != 0 {
+			sharedDatastoresInTopology = preferredDS
+			log.Infof("Using preferred datastores: %+v", preferredDS)
+		}
+	}
+
+	// Update sharedDatastores with the list of datastores received.
+	// Duplicates will not be added.
+	for _, ds := range sharedDatastoresInTopology {
+		var found bool
+		for _, sharedDS := range sharedDatastores {
+			if sharedDS.Info.Url == ds.Info.Url {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sharedDatastores = append(sharedDatastores, ds)
+		}
+	}
+	log.Infof("Obtained shared datastores: %+v", sharedDatastores)
+	var totalcapacity int64
+	var maxvolumecapacity int64
+	for _, sharedDS := range sharedDatastores {
+		totalcapacity = totalcapacity + sharedDS.Info.FreeSpace
+		if maxvolumecapacity < sharedDS.Info.FreeSpace {
+			maxvolumecapacity = sharedDS.Info.FreeSpace
+		}
+	}
+	log.Infof("GetStorageCapacityInTopology calculated totalcapacity: %v and maxvolumecapacity: %v for "+
+		"accessibleTopology: %+v and storagepolicy: %v", totalcapacity, maxvolumecapacity,
+		*accessibleTopology, storagepolicyname)
+	return totalcapacity, maxvolumecapacity, nil
+}
+
 // getSharedDatastoresInTopology returns a list of shared accessible datastores
 // for requested topology.
 func (volTopology *controllerVolumeTopology) getSharedDatastoresInTopology(ctx context.Context,
@@ -1408,6 +1539,11 @@ func (volTopology *wcpControllerVolumeTopology) GetSharedDatastoresInTopology(ct
 		}
 	}
 	return sharedDatastores, nil
+}
+func (volTopology *wcpControllerVolumeTopology) GetStorageCapacityInTopology(ctx context.Context,
+	accessibleTopology *csi.Topology, storagepolicyname string, vCenter *cnsvsphere.VirtualCenter) (int64, int64, error) {
+	log := logger.GetLogger(ctx)
+	return 0, 0, logger.LogNewErrorf(log, "Not Implemented")
 }
 
 // getClustersMatchingTopologySegment fetches clusters matching the topology requirement provided by checking

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -122,6 +123,13 @@ func (cntrlTopology *mockControllerVolumeTopology) GetTopologyInfoFromNodes(ctx 
 	reqParams interface{}) ([]map[string]string, error) {
 	log := logger.GetLogger(ctx)
 	return nil, logger.LogNewError(log, "GetTopologyInfoFromNodes is not yet implemented.")
+}
+
+func (cntrlTopology *mockControllerVolumeTopology) GetStorageCapacityInTopology(ctx context.Context,
+	accessibleTopology *csi.Topology, storagepolicyname string, vCenter *cnsvsphere.VirtualCenter) (int64, int64, error) {
+	//TODO implement me
+	log := logger.GetLogger(ctx)
+	return 0, 0, logger.LogNewError(log, "GetStorageCapacityInTopology is not yet implemented.")
 }
 
 // InitTopologyServiceInController returns a singleton implementation of the
