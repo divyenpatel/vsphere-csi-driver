@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"reflect"
 	"strconv"
@@ -1677,12 +1678,9 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 				return nil, logger.LogNewErrorf(log,
 					"could not find the topology of the volume provisioned on datastore %q", params.DatastoreURL)
 			case numSelectedSegments > 1:
-				// This situation will arise when datastore belongs to multiple zones but the
-				// storageTopologyType is `zonal`. This seems like a configuration error.
-				return nil, &common.InvalidTopologyProvisioningError{ErrMsg: fmt.Sprintf(
-					"zonal volume is provisioned on %q datastore which is accessible from multiple zones: %+v. "+
-						"Kindly check the configuration of the storage policy used in the StorageClass.",
-					params.DatastoreURL, selectedSegments)}
+				topologySegments = append(topologySegments, selectedSegments[rand.Intn(len(selectedSegments))])
+				log.Infof("Selected topology %+v from possible selections %+v", topologySegments,
+					selectedSegments)
 			default:
 				topologySegments = selectedSegments
 			}
