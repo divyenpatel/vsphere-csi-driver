@@ -751,7 +751,7 @@ func configMapUpdated(oldObj, newObj interface{}) {
 }
 
 // handleEnablementOfWLDIFSS checks if workload-domain-isolation FSS is enabled in csi-feature-states configmap
-// if workload-domain-isolation FSS wsa disabled and found enabled, container will be restarted
+// if workload-domain-isolation FSS was disabled and found enabled, container will be restarted
 func handleEnablementOfWLDIFSS(oldObj, newObj interface{}) {
 	var err error
 	ctx := context.Background()

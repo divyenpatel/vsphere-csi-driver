@@ -218,6 +218,7 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 		log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
 		return err
 	}
+	log.Infof("queryAllResult :%q", spew.Sdump(queryAllResult.Volumes))
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
 		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
 		// Replace Volume Metadata using old cluster ID and replace with the new SupervisorID
@@ -226,6 +227,7 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 			for _, volume := range queryAllResult.Volumes {
 				var updatedContainerClusterArray []cnstypes.CnsContainerCluster
 				var updatedContainerCluster cnstypes.CnsContainerCluster
+				log.Infof("Metadata: %q", spew.Sdump(volume.Metadata))
 				for _, containercluster := range volume.Metadata.ContainerClusterArray {
 					if containercluster.ClusterId == metadataSyncer.configInfo.Cfg.Global.ClusterID {
 						containercluster.ClusterId = metadataSyncer.configInfo.Cfg.Global.SupervisorID

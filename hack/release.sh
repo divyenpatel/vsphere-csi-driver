@@ -43,7 +43,7 @@ else
 fi
 GIT_COMMIT="$(git log -1 --format=%H)"
 GCR_KEY_FILE="${GCR_KEY_FILE:-}"
-GOPROXY="${GOPROXY:-https://proxy.golang.org}"
+GOPROXY="${GOPROXY:-https://packages.vcfd.broadcom.net/artifactory/proxy-golang-remote}"
 BUILD_RELEASE_TYPE="${BUILD_RELEASE_TYPE:-}"
 
 # CUSTOM_REPO_FOR_GOLANG can be used to pass custom repository for golang builder image.

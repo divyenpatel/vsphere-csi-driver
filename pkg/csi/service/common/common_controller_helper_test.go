@@ -20,6 +20,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/davecgh/go-spew/spew"
+	"github.com/stretchr/testify/assert"
 	vim25types "github.com/vmware/govmomi/vim25/types"
 )
 
@@ -175,6 +177,38 @@ func TestUseVslmAPIsFuncForVC70u1(t *testing.T) {
 	}
 }
 
+// TestUseVslmAPIsFuncForVC90RC1 tests UseVslmAPIs method for VC version 70u1
+func TestUseVslmAPIsFuncForVC90RC1(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	aboutInfo := vim25types.AboutInfo{
+		Name:                  "VMware vCenter Server",
+		FullName:              "VMware vCenter Server 9.0.0 build-24495978",
+		Vendor:                "VMware, Inc.",
+		Version:               "9.0.0",
+		Build:                 "24495978",
+		LocaleVersion:         "INTL",
+		LocaleBuild:           "000",
+		OsType:                "linux-x64",
+		ProductLineId:         "vpx",
+		ApiType:               "VirtualCenter",
+		ApiVersion:            "9.0.0.0.rc1",
+		InstanceUuid:          "4394cd59-cd63-43df-bdf5-8a2cee4fe055",
+		LicenseProductName:    "VMware VirtualCenter Server",
+		LicenseProductVersion: "9.0",
+	}
+	bUseVslm, err := UseVslmAPIs(ctx, aboutInfo)
+	if err == nil {
+		if bUseVslm {
+			t.Fatal("UseVslmAPIs returned true, expecting false")
+		} else {
+			t.Log(spew.Sprint("UseVslmAPIs returned false for aboutInfo:", aboutInfo))
+		}
+	} else {
+		t.Fatal("Received error from UseVslmAPIs method")
+	}
+}
+
 // TestCheckAPIForVC8 tests CheckAPI method for VC version 8.
 func TestCheckAPIForVC8(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -197,4 +231,40 @@ func TestCheckAPIForVC70u3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckAPI method failing for VC %q", vcVersion)
 	}
+}
+
+// TestCheckAPIForVC90 tests CheckAPI method for VC version 9.0.
+func TestCheckAPIForVC90(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	vcVersion := "9.0.0.0.rc1"
+	err := CheckAPI(ctx, vcVersion, MinSupportedVCenterMajor, MinSupportedVCenterMinor,
+		MinSupportedVCenterPatch)
+	if err != nil {
+		t.Fatalf("CheckAPI method failing for VC %q", vcVersion)
+	}
+}
+
+func TestCheckAPI(t *testing.T) {
+	type testCase struct {
+		Name string
+
+		Ctx                      context.Context
+		VersionToCheck           string
+		MinSupportedVCenterMajor int
+		MinSupportedVCenterMinor int
+		MinSupportedVCenterPatch int
+
+		ExpectedError error
+	}
+
+	validate := func(t *testing.T, tc *testCase) {
+		t.Run(tc.Name, func(t *testing.T) {
+			actualError := CheckAPI(tc.Ctx, tc.VersionToCheck, tc.MinSupportedVCenterMajor, tc.MinSupportedVCenterMinor, tc.MinSupportedVCenterPatch)
+
+			assert.Equal(t, tc.ExpectedError, actualError)
+		})
+	}
+
+	validate(t, &testCase{})
 }
