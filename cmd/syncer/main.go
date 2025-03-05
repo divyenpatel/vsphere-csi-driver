@@ -20,7 +20,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
@@ -28,16 +27,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection"
 	rl "k8s.io/client-go/tools/leaderelection/resourcelock"
-
+	ctrl "sigs.k8s.io/controller-runtime"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/node"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/prometheus"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
@@ -82,6 +80,7 @@ var (
 	internalFSSNamespace      = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
 	periodicSyncIntervalInMin = flag.Duration("storagequota-sync-interval", 30*time.Minute,
 		"Periodic sync interval in Minutes")
+	enablePprofserver = flag.Bool("enablepprofserver", false, "Enable enable Pprof server")
 )
 
 // main for vsphere syncer.
@@ -133,7 +132,7 @@ func main() {
 		}
 	} else if *operationMode == operationModeMetaDataSync {
 		log.Infof("Starting container with operation mode: %v", operationModeMetaDataSync)
-		var err error
+		//var err error
 
 		// run will be executed if this instance is elected as the leader
 		// or if leader election is not enabled.
@@ -164,16 +163,20 @@ func main() {
 					cleanupSessions(ctx, r)
 				}
 			}()
-			prometheus.SyncerInfo.WithLabelValues(syncer.Version).Set(1)
-			for {
-				log.Info("Starting the http server to expose Prometheus metrics..")
-				http.Handle("/metrics", promhttp.Handler())
-				err = http.ListenAndServe(":2113", nil)
-				if err != nil {
-					log.Warnf("Http server that exposes the Prometheus exited with err: %+v", err)
+
+			/*
+				prometheus.SyncerInfo.WithLabelValues(syncer.Version).Set(1)
+				for {
+					log.Info("Starting the http server to expose Prometheus metrics..")
+					http.Handle("/metrics", promhttp.Handler())
+					err = http.ListenAndServe(":2113", nil)
+					if err != nil {
+						log.Warnf("Http server that exposes the Prometheus exited with err: %+v", err)
+					}
+					log.Info("Restarting http server to expose Prometheus metrics..")
 				}
-				log.Info("Restarting http server to expose Prometheus metrics..")
-			}
+
+			*/
 		}()
 
 		// Initialize syncer components that are dependant on the outcome of
@@ -276,6 +279,27 @@ func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 
 		// Initialize CNS Operator for Supervisor clusters.
 		if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+			go func() {
+				if *enablePprofserver {
+					log.Infof("starting Pprof server at 127.0.0.1:2113")
+
+					mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+						Metrics: metricsserver.Options{
+							BindAddress: "0",
+						},
+						PprofBindAddress: "127.0.0.1:2113",
+					})
+					if err != nil {
+						log.Errorf("unable to create controller manager. Error: %v", err)
+						os.Exit(1)
+					}
+					err = mgr.Start(ctx)
+					if err != nil {
+						log.Errorf("unable to start controller manager. Error: %v", err)
+					}
+				}
+			}()
+
 			go func() {
 				defer func() {
 					log.Info("Cleaning up vc sessions storage pool service")
