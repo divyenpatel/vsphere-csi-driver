@@ -477,6 +477,16 @@ spec:
       dnsPolicy: "ClusterFirstWithHostNet"
       serviceAccountName: vsphere-csi-node
       priorityClassName: system-node-critical # Guarantees scheduling for critical system pods
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+                - arm64
       nodeSelector:
         kubernetes.io/os: linux
       containers:
