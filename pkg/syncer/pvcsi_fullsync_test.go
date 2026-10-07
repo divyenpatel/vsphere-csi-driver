@@ -2711,6 +2711,47 @@ func TestCleanUpCnsVolumeMetadata(t *testing.T) {
 			kept: []string{"pvc-data", "pod-data"},
 		},
 		{
+			// Two clusters in one supervisor namespace reuse both a PVC name and a Pod name, as
+			// when the same chart is deployed twice. Every duplicate key matches across the
+			// clusters. Cluster API owners are never marked as leftovers whatever their served
+			// version, so none of the four may be deleted; an exact match on the v1beta1
+			// apiVersion would have marked all of them.
+			name: "two v1beta2 clusters reusing a PVC name and a Pod name keep every CR",
+			objs: []*cnsvolumemetadatav1alpha1.CnsVolumeMetadata{
+				cleanupOwnedBy(newCleanupTestCVM("a-pvc", cleanupThisGCUID, "data-0", "default",
+					pvcEntity, cleanupCAPIV1beta2), cleanupThisGCName),
+				cleanupOwnedBy(newCleanupTestCVM("a-pod", cleanupThisGCUID, "web", "default",
+					podEntity, cleanupCAPIV1beta2), cleanupThisGCName),
+				cleanupOwnedBy(newCleanupTestCVM("b-pvc", cleanupOtherGCUID, "data-0", "default",
+					pvcEntity, cleanupCAPIV1beta2), cleanupOtherGCName),
+				cleanupOwnedBy(newCleanupTestCVM("b-pod", cleanupOtherGCUID, "web", "default",
+					podEntity, cleanupCAPIV1beta2), cleanupOtherGCName),
+			},
+			kept: []string{"a-pvc", "a-pod", "b-pvc", "b-pod"},
+		},
+		{
+			// This cluster has just been upgraded and still has its legacy leftovers, while a
+			// neighbour that is still a legacy cluster reuses both entity names. Legacy owners
+			// are the only ones the cleanup acts on, so only the cluster-membership check keeps
+			// the neighbour's live CRs out of the duplicate count.
+			name: "upgrade leftovers are removed while a legacy neighbour reusing the names is kept",
+			objs: []*cnsvolumemetadatav1alpha1.CnsVolumeMetadata{
+				cleanupOwnedBy(newCleanupTestCVM("a-pvc-leftover", cleanupLegacyGCUID, "data-0", "default",
+					pvcEntity, cleanupLegacyTKCAPIVersion), cleanupThisGCName),
+				cleanupOwnedBy(newCleanupTestCVM("a-pod-leftover", cleanupLegacyGCUID, "web", "default",
+					podEntity, cleanupLegacyTKCAPIVersion), cleanupThisGCName),
+				cleanupOwnedBy(newCleanupTestCVM("a-pvc", cleanupThisGCUID, "data-0", "default",
+					pvcEntity, cleanupCAPIV1beta2), cleanupThisGCName),
+				cleanupOwnedBy(newCleanupTestCVM("a-pod", cleanupThisGCUID, "web", "default",
+					podEntity, cleanupCAPIV1beta2), cleanupThisGCName),
+				cleanupOwnedBy(newCleanupTestCVM("b-pvc", cleanupOtherGCUID, "data-0", "default",
+					pvcEntity, cleanupLegacyTKCAPIVersion), cleanupOtherGCName),
+				cleanupOwnedBy(newCleanupTestCVM("b-pod", cleanupOtherGCUID, "web", "default",
+					podEntity, cleanupLegacyTKCAPIVersion), cleanupOtherGCName),
+			},
+			kept: []string{"a-pvc", "a-pod", "b-pvc", "b-pod"},
+		},
+		{
 			name: "CRs without owner references are kept",
 			objs: []*cnsvolumemetadatav1alpha1.CnsVolumeMetadata{
 				newCleanupTestCVM("no-owner-a", cleanupThisGCUID, "data-0", "default",
