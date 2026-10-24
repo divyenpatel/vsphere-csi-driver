@@ -20,6 +20,10 @@ rules:
   - apiGroups: ["virtualnode.vmware.com"]
     resources: ["hostmappings"]
     verbs: ["get", "list", "watch"]
+  # TODO: Replace with the finalized Pod-to-host placement API group/resource.
+  - apiGroups: ["scheduling.podvm.vmware.com"]
+    resources: ["podvmplacements"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes", "pods", "resourcequotas", "namespaces", "services", "secrets"]
     verbs: ["get", "list", "watch"]
