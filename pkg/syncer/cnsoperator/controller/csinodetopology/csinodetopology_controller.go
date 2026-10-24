@@ -18,7 +18,6 @@ package csinodetopology
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -117,14 +116,13 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 			return err
 		}
 
-		enableHostLocalSupportInGuest = coCommonInterface.IsPVCSIFSSEnabled(ctx, common.HostLocalStorageSupportFSS)
+		enableHostLocalSupportInGuest = coCommonInterface.IsFSSEnabled(ctx, common.HostLocalStorageSupportFSS)
 		if enableHostLocalSupportInGuest {
 			log.Infof("The %s FSS is enabled in %s", common.HostLocalStorageSupportFSS, cnstypes.CnsClusterFlavorGuest)
 
 			// Used to read the Supervisor PVC backing the node VM's
 			// non-removable (boot) volume, whose
-			// csi.vsphere.volume-accessible-topology annotation carries the
-			// ESXi hostname.
+			// result metadata carries the committed ESXi host MoID.
 			supervisorClientset, err = kubernetes.NewForConfig(restClientConfigForSupervisor)
 			if err != nil {
 				log.Errorf("failed to create supervisor clientset. Error: %+v", err)
@@ -456,7 +454,7 @@ func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv
 		Namespace: supervisorNamespace,
 		Name:      instance.Name, // use the nodeName as the VM key
 	}
-	var zone, hostname string
+	var zone, hostMoID string
 	if enableHostLocalSupportInGuest {
 		// v1alpha5 is needed here (and only here) to read
 		// Spec.Volumes[].Removable, which identifies the boot volume for
@@ -470,14 +468,14 @@ func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv
 		zone = virtualMachine.Status.Zone
 
 		// For host-local storage, the node VM's non-removable (boot) volume's
-		// backing Supervisor PVC carries the resolved ESXi hostname in its
-		// csi.vsphere.volume-accessible-topology annotation (stamped by the
-		// Supervisor CSI/CNS provisioning path).
-		hostname, err = getHostnameFromNonRemovableVolume(ctx, supervisorClientset, virtualMachine,
+		// backing Supervisor PVC carries the resolved ESXi host MoID in its
+		// cns.vmware.com/esxi-host-moid annotation (stamped by the
+		// Supervisor provisioner alongside accessible topology).
+		hostMoID, err = getHostMoIDFromNonRemovableVolume(ctx, supervisorClientset, virtualMachine,
 			supervisorNamespace)
 		if err != nil {
 			return nil, logger.LogNewErrorf(log,
-				"failed to resolve ESXi hostname for node %q. Error: %+v", instance.Name, err)
+				"failed to resolve ESXi host MoID for node %q. Error: %+v", instance.Name, err)
 		}
 	} else {
 		log.Info("fetching virtual machines with all versions")
@@ -498,11 +496,11 @@ func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv
 			},
 		)
 	}
-	if hostname != "" {
+	if hostMoID != "" {
 		topologyLabels = append(topologyLabels,
 			csinodetopologyv1alpha1.TopologyLabel{
 				Key:   common.GuestClusterTopologyLabelHost,
-				Value: hostname,
+				Value: hostMoID,
 			},
 		)
 	}
@@ -510,16 +508,10 @@ func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv
 	return topologyLabels, nil
 }
 
-// getHostnameFromNonRemovableVolume resolves the ESXi hostname for a
-// host-local node VM. It finds the VM's non-removable volume (the boot
-// disk, marked removable=false by VM Operator to protect it from accidental
-// removal), fetches the Supervisor PVC backing that volume, and reads the
-// "kubernetes.io/hostname" segment out of the PVC's
-// csi.vsphere.volume-accessible-topology annotation.
-func getHostnameFromNonRemovableVolume(ctx context.Context, supervisorClientset kubernetes.Interface,
+// getHostMoIDFromNonRemovableVolume reads the boot PVC's committed host mirror.
+// Shared zonal boot volumes have no host mirror and publish zone only.
+func getHostMoIDFromNonRemovableVolume(ctx context.Context, supervisorClientset kubernetes.Interface,
 	virtualMachine *vmoperatorv1alpha5.VirtualMachine, supervisorNamespace string) (string, error) {
-	log := logger.GetLogger(ctx)
-
 	var pvcName string
 	for _, vol := range virtualMachine.Spec.Volumes {
 		if vol.Removable != nil && !*vol.Removable && vol.PersistentVolumeClaim != nil {
@@ -542,28 +534,24 @@ func getHostnameFromNonRemovableVolume(ctx context.Context, supervisorClientset 
 	// is only stamped once the underlying volume is provisioned and bound,
 	// so a still-Pending PVC must be treated as a hard error (and retried),
 	// not silently skipped.
-	if pvc.Status.Phase == corev1.ClaimPending {
-		return "", fmt.Errorf("boot disk PVC %q is still in %q phase; cannot resolve ESXi hostname yet",
-			pvcName, corev1.ClaimPending)
+	if pvc.Status.Phase != corev1.ClaimBound {
+		return "", fmt.Errorf("boot disk PVC %q is still in %q phase; cannot resolve ESXi host MoID yet",
+			pvcName, pvc.Status.Phase)
 	}
 
-	rawTopology, ok := pvc.Annotations[common.AnnVolumeAccessibleTopology]
-	if !ok || rawTopology == "" {
-		return "", fmt.Errorf("PVC %q has no %q annotation", pvcName, common.AnnVolumeAccessibleTopology)
+	topologies, err := common.GuestAccessibleTopology(pvc)
+	if err != nil {
+		return "", err
 	}
-	var segmentsList []map[string]string
-	if err := json.Unmarshal([]byte(rawTopology), &segmentsList); err != nil {
-		return "", fmt.Errorf("failed to parse %q annotation on PVC %q: %w",
-			common.AnnVolumeAccessibleTopology, pvcName, err)
-	}
-	for _, segments := range segmentsList {
-		if hostname := segments[corev1.LabelHostname]; hostname != "" {
-			return hostname, nil
+	host := pvc.Annotations[common.AttributeESXiHostMoID]
+	if host != "" {
+		for _, topology := range topologies {
+			if virtualMachine.Status.Zone == "" || topology[corev1.LabelTopologyZone] != virtualMachine.Status.Zone {
+				return "", fmt.Errorf("boot volume zone does not match VM %q zone", virtualMachine.Name)
+			}
 		}
 	}
-	log.Infof("PVC %q's %q annotation did not contain a %q key", pvcName, common.AnnVolumeAccessibleTopology,
-		corev1.LabelHostname)
-	return "", nil
+	return host, nil
 }
 
 // getVirtualMachineV1alpha5 fetches a VirtualMachine using the v1alpha5 API
