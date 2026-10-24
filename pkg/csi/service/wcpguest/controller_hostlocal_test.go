@@ -38,7 +38,7 @@ import (
 
 const (
 	hostLocalZoneValue  = "az1"
-	hostLocalHostValue  = "lvn-dvm-10-161-28-26.dvm.lvn.broadcom.net"
+	hostLocalHostValue  = "host-45"
 	hostLocalAccessMode = csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER
 )
 
@@ -160,6 +160,7 @@ func runCreateVolumeAndBindSupervisorPVCWithAccessibleTopology(t *testing.T, c *
 		pvc.Annotations = map[string]string{}
 	}
 	pvc.Annotations[common.AnnVolumeAccessibleTopology] = accessibleTopologyAnnotation
+	pvc.Annotations[common.AttributeESXiHostMoID] = hostLocalHostValue
 	pvc.Status.Phase = v1.ClaimBound
 	if _, err := c.supervisorClient.CoreV1().PersistentVolumeClaims(c.supervisorNamespace).Update(
 		context.Background(), pvc, metav1.UpdateOptions{}); err != nil {
@@ -171,70 +172,9 @@ func runCreateVolumeAndBindSupervisorPVCWithAccessibleTopology(t *testing.T, c *
 	return resp, err
 }
 
-// --- translateTopologyHostKey helper tests --------------------------------
-
-func TestTranslateTopologyHostKey(t *testing.T) {
-	tests := []struct {
-		name        string
-		segments    map[string]string
-		fromKey     string
-		toKey       string
-		keepHostKey bool
-		want        map[string]string
-	}{
-		{
-			name: "key present, keepHostKey true renames the key",
-			segments: map[string]string{
-				common.GuestClusterTopologyLabelHost: hostLocalHostValue,
-				"topology.kubernetes.io/zone":        hostLocalZoneValue,
-			},
-			fromKey:     common.GuestClusterTopologyLabelHost,
-			toKey:       v1.LabelHostname,
-			keepHostKey: true,
-			want: map[string]string{
-				v1.LabelHostname:              hostLocalHostValue,
-				"topology.kubernetes.io/zone": hostLocalZoneValue,
-			},
-		},
-		{
-			name: "key present, keepHostKey false drops the key",
-			segments: map[string]string{
-				common.GuestClusterTopologyLabelHost: hostLocalHostValue,
-				"topology.kubernetes.io/zone":        hostLocalZoneValue,
-			},
-			fromKey:     common.GuestClusterTopologyLabelHost,
-			toKey:       v1.LabelHostname,
-			keepHostKey: false,
-			want: map[string]string{
-				"topology.kubernetes.io/zone": hostLocalZoneValue,
-			},
-		},
-		{
-			name: "key absent is a no-op regardless of keepHostKey",
-			segments: map[string]string{
-				"topology.kubernetes.io/zone": hostLocalZoneValue,
-			},
-			fromKey:     common.GuestClusterTopologyLabelHost,
-			toKey:       v1.LabelHostname,
-			keepHostKey: true,
-			want: map[string]string{
-				"topology.kubernetes.io/zone": hostLocalZoneValue,
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := translateTopologyHostKey(tc.segments, tc.fromKey, tc.toKey, tc.keepHostKey)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("translateTopologyHostKey() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
 // --- CreateVolume request-side translation tests --------------------------
 
-func TestCreateVolume_HostLocal_RequestedTopology_TranslatesHostKey(t *testing.T) {
+func TestCreateVolume_HostLocal_RequestedTopology_PreservesHostMoID(t *testing.T) {
 	c := newFVSCreateController(t)
 	co, err := unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
 	if err != nil {
@@ -251,7 +191,7 @@ func TestCreateVolume_HostLocal_RequestedTopology_TranslatesHostKey(t *testing.T
 	if err != nil {
 		t.Fatalf("CreateVolume failed: %v", err)
 	}
-	expectSupervisorAnnotation(t, pvc, hostLocalWantAnnotation(v1.LabelHostname))
+	expectSupervisorAnnotation(t, pvc, hostLocalWantAnnotation(common.GuestClusterTopologyLabelHost))
 }
 
 func TestCreateVolume_HostLocal_FSSDisabled_RejectsHostKey(t *testing.T) {
@@ -314,7 +254,7 @@ func TestCreateVolume_HostLocal_NoHostKey_Unaffected(t *testing.T) {
 
 // --- CreateVolume response-side translation tests --------------------------
 
-func TestCreateVolume_HostLocal_AccessibleTopology_TranslatesBack(t *testing.T) {
+func TestCreateVolume_HostLocal_AccessibleTopology_UsesHostMirror(t *testing.T) {
 	c := newFVSCreateController(t)
 	co, err := unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
 	if err != nil {
@@ -327,7 +267,7 @@ func TestCreateVolume_HostLocal_AccessibleTopology_TranslatesBack(t *testing.T) 
 	seedHostLocalWorkerNode(t, c)
 
 	req := hostLocalCreateRequest(hostLocalAccessMode, hostLocalZoneValue, hostLocalHostValue)
-	accessibleTopologyAnnotation := hostLocalWantAnnotation(v1.LabelHostname)
+	accessibleTopologyAnnotation := `[{"kubernetes.io/hostname":"supervisor-node","topology.kubernetes.io/zone":"az1"}]`
 	resp, err := runCreateVolumeAndBindSupervisorPVCWithAccessibleTopology(t, c, req, accessibleTopologyAnnotation, nil)
 	if err != nil {
 		t.Fatalf("CreateVolume failed: %v", err)
@@ -335,13 +275,9 @@ func TestCreateVolume_HostLocal_AccessibleTopology_TranslatesBack(t *testing.T) 
 	assertAccessibleTopologyHasHostKey(t, resp)
 }
 
-// TestCreateVolume_HostLocal_AccessibleTopology_TranslatesBack_FSSDisabledAtReadTime proves the
-// response-side translation is unconditional: even if the FSS becomes disabled after the request
-// was accepted (but before the response-side block re-reads the bound supervisor PVC), a hostname
-// key already present in the accessible-topology annotation is still translated back to the VKS
-// host key, since the volume's host pinning in CNS is already a committed fact by that point
-// (idempotent-retry / FSS-toggled-off-after-creation case).
-func TestCreateVolume_HostLocal_AccessibleTopology_TranslatesBack_FSSDisabledAtReadTime(t *testing.T) {
+// A committed backing-host result remains authoritative even when the FSS is
+// disabled after the request was accepted.
+func TestCreateVolume_HostLocal_AccessibleTopology_UsesHostMirror_FSSDisabledAtReadTime(t *testing.T) {
 	c := newFVSCreateController(t)
 	co, err := unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
 	if err != nil {
@@ -357,7 +293,7 @@ func TestCreateVolume_HostLocal_AccessibleTopology_TranslatesBack_FSSDisabledAtR
 	seedHostLocalWorkerNode(t, c)
 
 	req := hostLocalCreateRequest(hostLocalAccessMode, hostLocalZoneValue, hostLocalHostValue)
-	accessibleTopologyAnnotation := hostLocalWantAnnotation(v1.LabelHostname)
+	accessibleTopologyAnnotation := `[{"topology.kubernetes.io/zone":"az1"}]`
 
 	disableFSS := func() {
 		if err := co.DisableFSS(context.Background(), common.HostLocalStorageSupportFSS); err != nil {
@@ -486,5 +422,75 @@ func TestFilterOutControlPlaneOnlyTopologySegments(t *testing.T) {
 				t.Fatalf("filterOutControlPlaneOnlyTopologySegments() = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// This wrapper deliberately distinguishes the local switch from the effective
+// capability, unlike FakeK8SOrchestrator's default implementation.
+type guestStorageFeatureCO struct {
+	commonco.COCommonInterface
+	hostLocal, podVMV2 bool
+}
+
+func (c *guestStorageFeatureCO) IsPVCSIFSSEnabled(ctx context.Context, feature string) bool {
+	if feature == common.HostLocalStorageSupportFSS {
+		return true
+	}
+	return c.COCommonInterface.IsPVCSIFSSEnabled(ctx, feature)
+}
+
+func (c *guestStorageFeatureCO) IsFSSEnabled(ctx context.Context, feature string) bool {
+	switch feature {
+	case common.HostLocalStorageSupportFSS:
+		return c.hostLocal
+	case common.PodVMV2SupportFSS:
+		return c.podVMV2
+	default:
+		return c.COCommonInterface.IsFSSEnabled(ctx, feature)
+	}
+}
+
+func TestCreateVolumeStorageFeatureMatrix(t *testing.T) {
+	original := commonco.ContainerOrchestratorUtility
+	t.Cleanup(func() { commonco.ContainerOrchestratorUtility = original })
+	for _, hostLocal := range []bool{false, true} {
+		for _, podVMV2 := range []bool{false, true} {
+			for _, hostRequest := range []bool{false, true} {
+				t.Run(fmt.Sprintf("hostLocal=%t/podVMV2=%t/hostRequest=%t", hostLocal, podVMV2, hostRequest), func(t *testing.T) {
+					c := newFVSCreateController(t)
+					co, err := unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
+					if err != nil {
+						t.Fatal(err)
+					}
+					commonco.ContainerOrchestratorUtility = &guestStorageFeatureCO{COCommonInterface: co, hostLocal: hostLocal, podVMV2: podVMV2}
+					seedHostLocalWorkerNode(t, c)
+					host := ""
+					if hostRequest {
+						host = hostLocalHostValue
+					}
+					req := hostLocalCreateRequest(hostLocalAccessMode, hostLocalZoneValue, host)
+					if hostRequest && !hostLocal {
+						_, _, err := runCreateVolumeAndBindSupervisorPVC(t, c, req)
+						if status.Code(err) != codes.Unimplemented {
+							t.Fatalf("expected disabled host capability rejection, got %v", err)
+						}
+						_, err = c.supervisorClient.CoreV1().PersistentVolumeClaims(c.supervisorNamespace).Get(context.Background(), fvsCreateSupervisorPVCName, metav1.GetOptions{})
+						if !apierrors.IsNotFound(err) {
+							t.Fatalf("unexpected Supervisor PVC: %v", err)
+						}
+						return
+					}
+					pvc, _, err := runCreateVolumeAndBindSupervisorPVC(t, c, req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := `[{"topology.kubernetes.io/zone":"` + hostLocalZoneValue + `"}]`
+					if hostRequest {
+						want = hostLocalWantAnnotation(common.GuestClusterTopologyLabelHost)
+					}
+					expectSupervisorAnnotation(t, pvc, want)
+				})
+			}
+		}
 	}
 }

@@ -32,77 +32,12 @@ import (
 
 const (
 	hostLocalFullSyncZoneValue = "az1"
-	hostLocalFullSyncHostValue = "lvn-dvm-10-161-28-26.dvm.lvn.broadcom.net"
+	hostLocalFullSyncHostValue = "host-45"
 )
 
-func TestTranslateTopologyHostKey_Syncer(t *testing.T) {
-	tests := []struct {
-		name        string
-		segments    map[string]string
-		fromKey     string
-		toKey       string
-		keepHostKey bool
-		want        map[string]string
-	}{
-		{
-			name: "key present, keepHostKey true renames the key",
-			segments: map[string]string{
-				v1.LabelHostname:              hostLocalFullSyncHostValue,
-				"topology.kubernetes.io/zone": hostLocalFullSyncZoneValue,
-			},
-			fromKey:     v1.LabelHostname,
-			toKey:       common.GuestClusterTopologyLabelHost,
-			keepHostKey: true,
-			want: map[string]string{
-				common.GuestClusterTopologyLabelHost: hostLocalFullSyncHostValue,
-				"topology.kubernetes.io/zone":        hostLocalFullSyncZoneValue,
-			},
-		},
-		{
-			name: "key present, keepHostKey false drops the key",
-			segments: map[string]string{
-				v1.LabelHostname:              hostLocalFullSyncHostValue,
-				"topology.kubernetes.io/zone": hostLocalFullSyncZoneValue,
-			},
-			fromKey:     v1.LabelHostname,
-			toKey:       common.GuestClusterTopologyLabelHost,
-			keepHostKey: false,
-			want: map[string]string{
-				"topology.kubernetes.io/zone": hostLocalFullSyncZoneValue,
-			},
-		},
-		{
-			name: "key absent is a no-op regardless of keepHostKey",
-			segments: map[string]string{
-				"topology.kubernetes.io/zone": hostLocalFullSyncZoneValue,
-			},
-			fromKey:     v1.LabelHostname,
-			toKey:       common.GuestClusterTopologyLabelHost,
-			keepHostKey: true,
-			want: map[string]string{
-				"topology.kubernetes.io/zone": hostLocalFullSyncZoneValue,
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := translateTopologyHostKey(tc.segments, tc.fromKey, tc.toKey, tc.keepHostKey)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("translateTopologyHostKey() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestAddNodeAffinityRulesOnPV_HostLocal_TranslatesHostKey verifies that when the supervisor
-// PVC's csi.vsphere.volume-accessible-topology annotation carries kubernetes.io/hostname (set by
-// the Supervisor CSI controller for a host-local volume), AddNodeAffinityRulesOnPV translates it
-// back to the VKS host key (common.GuestClusterTopologyLabelHost) on the Guest PV's NodeAffinity.
-// This translation is unconditional (not gated on the host-local-storage-support FSS): by the
-// time full-sync runs, the volume's host pinning in CNS is already a committed fact, so the
-// FSS/capability's current state is irrelevant here (see controller.go's CreateVolume for the
-// only gate in this feature, applied at request time).
-func TestAddNodeAffinityRulesOnPV_HostLocal_TranslatesHostKey(t *testing.T) {
+// TestAddNodeAffinityRulesOnPV_HostLocal_UsesHostMirror verifies that zone-only
+// Supervisor topology plus the actual host mirror yields zone+host guest affinity.
+func TestAddNodeAffinityRulesOnPV_HostLocal_UsesHostMirror(t *testing.T) {
 	ctx := context.Background()
 
 	supPVC := &v1.PersistentVolumeClaim{
@@ -110,8 +45,8 @@ func TestAddNodeAffinityRulesOnPV_HostLocal_TranslatesHostKey(t *testing.T) {
 			Name:      "volume-1",
 			Namespace: "sv-namespace",
 			Annotations: map[string]string{
-				common.AnnVolumeAccessibleTopology: `[{"kubernetes.io/hostname":"` + hostLocalFullSyncHostValue +
-					`","topology.kubernetes.io/zone":"` + hostLocalFullSyncZoneValue + `"}]`,
+				common.AnnVolumeAccessibleTopology: `[{"topology.kubernetes.io/zone":"` + hostLocalFullSyncZoneValue + `"}]`,
+				common.AttributeESXiHostMoID:       hostLocalFullSyncHostValue,
 			},
 		},
 	}
