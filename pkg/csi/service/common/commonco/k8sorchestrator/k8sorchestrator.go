@@ -236,6 +236,17 @@ func (m *nodeIDToNameMap) remove(nodeID string) {
 	delete(m.items, nodeID)
 }
 
+func (m *nodeIDToNameMap) removeOwned(host, node string) {
+	m.Lock()
+	defer m.Unlock()
+	if m.items[host] == node {
+		delete(m.items, host)
+	}
+	if m.nameToID[node] == host {
+		delete(m.nameToID, node)
+	}
+}
+
 // getNameToIDCopy returns a copy of the node name -> host MoID map under a read
 // lock so callers get a race-free snapshot they can iterate safely.
 func (m *nodeIDToNameMap) getNameToIDCopy() map[string]string {
@@ -300,6 +311,7 @@ type K8sOrchestrator struct {
 	volumeIDToPvcMap     *volumeIDToPvcMap
 	pvcToVolumeIDMap     *pvcToVolumeIDMap
 	nodeIDToNameMap      *nodeIDToNameMap
+	hostInventory        *hostInventory
 	volumeNameToNodesMap *volumeNameToNodesMap // used when ListVolume FSS is enabled
 	volumeIDToNameMap    *volumeIDToNameMap    // used when ListVolume FSS is enabled
 	k8sClient            clientset.Interface
@@ -2037,6 +2049,13 @@ func initNodeIDToNameMap(ctx context.Context) error {
 		nameToID: make(map[string]string),
 	}
 
+	if k8sOrchestratorInstance.IsFSSEnabled(ctx, common.PodVMV2Support) {
+		// Resolve vCenter lazily: it may not be registered during orchestrator initialization.
+		k8sOrchestratorInstance.hostInventory = &hostInventory{
+			client: k8sOrchestratorInstance.k8sClient, clusterHosts: queryClusterHosts,
+		}
+	}
+
 	// Set up kubernetes resource listener to listen events on Node
 	err := k8sOrchestratorInstance.informerManager.AddNodeListener(
 		ctx,
@@ -2090,13 +2109,15 @@ func nodeUpdate(oldObject interface{}, newObject interface{}) {
 		return
 	}
 
-	_, oldOk := oldnode.ObjectMeta.Annotations[common.HostMoidAnnotationKey]
-	newNodeMoID, newOk := newnode.ObjectMeta.Annotations[common.HostMoidAnnotationKey]
-
-	if !oldOk && newOk {
-		// If annotation is not found on the old node but found on the new one, add it to the map.
-		log.Debugf("Adding nodeMoid %s and node name %s to the map.", newNodeMoID, newnode.Name)
-		k8sOrchestratorInstance.nodeIDToNameMap.add(newNodeMoID, newnode.Name)
+	oldID := oldnode.Annotations[common.HostMoidAnnotationKey]
+	newID := newnode.Annotations[common.HostMoidAnnotationKey]
+	if oldID != newID {
+		if oldID != "" {
+			k8sOrchestratorInstance.nodeIDToNameMap.removeOwned(oldID, oldnode.Name)
+		}
+		if newID != "" {
+			k8sOrchestratorInstance.nodeIDToNameMap.add(newID, newnode.Name)
+		}
 	}
 }
 
@@ -2104,6 +2125,9 @@ func nodeUpdate(oldObject interface{}, newObject interface{}) {
 // node annotation vmware-system-esxi-node-moid
 func nodeRemove(obj interface{}) {
 	log := logger.GetLogger(context.Background())
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
 	node, ok := obj.(*v1.Node)
 	if node == nil || !ok {
 		log.Warnf("nodeRemove: unrecognized object %+v", obj)
@@ -2116,12 +2140,24 @@ func nodeRemove(obj interface{}) {
 		log.Debugf("nodeRemove: %s annotation not found on the node %s", common.HostMoidAnnotationKey, node.Name)
 		return
 	}
-	k8sOrchestratorInstance.nodeIDToNameMap.remove(nodeMoID)
+	k8sOrchestratorInstance.nodeIDToNameMap.removeOwned(nodeMoID, node.Name)
 }
 
 // GetNodeIDtoNameMap returns a map containing the nodeID to node name
 func (c *K8sOrchestrator) GetNodeIDtoNameMap(ctx context.Context) map[string]string {
-	return c.nodeIDToNameMap.items
+	if c.hostInventory != nil {
+		return c.hostInventory.snapshot(ctx)
+	}
+	result := make(map[string]string)
+	if c.nodeIDToNameMap == nil {
+		return result
+	}
+	c.nodeIDToNameMap.RLock()
+	defer c.nodeIDToNameMap.RUnlock()
+	for host, node := range c.nodeIDToNameMap.items {
+		result[host] = node
+	}
+	return result
 }
 
 // GetNodeNameToHostMoIDMap returns a race-free copy of the node name to ESXi host MoID map,
@@ -2129,7 +2165,19 @@ func (c *K8sOrchestrator) GetNodeIDtoNameMap(ctx context.Context) map[string]str
 // candidate hosts from the hostnames in the accessibility requirement without rebuilding the
 // reverse map on every CreateVolume call.
 func (c *K8sOrchestrator) GetNodeNameToHostMoIDMap(ctx context.Context) map[string]string {
-	return c.nodeIDToNameMap.getNameToIDCopy()
+	// Compatibility accessor: omit cluster-backed Nodes instead of choosing one host.
+	result := make(map[string]string)
+	multiple := make(map[string]bool)
+	for host, node := range c.GetNodeIDtoNameMap(ctx) {
+		if _, exists := result[node]; exists {
+			multiple[node] = true
+		}
+		result[node] = host
+	}
+	for node := range multiple {
+		delete(result, node)
+	}
+	return result
 }
 
 // GetFakeAttachedVolumes returns a map of volumeIDs to a bool, which is set
