@@ -1212,6 +1212,14 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 			log.Infof("Pinned host-local volume %q to host %q owning the snapshot's source volume",
 				req.Name, snapshotSourceHostMoRef.Value)
 		}
+		if commonco.ContainerOrchestratorUtility.IsPodVMV2EnabledAtStartup(ctx) {
+			hostMoRefs, err = applyPodVMPlacement(ctx, vc.Client.ServiceContent.About.InstanceUuid,
+				pvcNamespace, pvcName, hostMoRefs)
+			if err != nil {
+				return nil, csifault.CSIInternalFault, status.Errorf(codes.FailedPrecondition,
+					"host-local Pod placement is not ready: %v", err)
+			}
+		}
 	}
 
 	// Every placement mechanism CNS accepts is empty: no candidate hosts, no candidate
