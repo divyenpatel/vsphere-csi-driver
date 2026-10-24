@@ -576,6 +576,29 @@ func (h *CSISupervisorMutationWebhook) mutateNewPVC(ctx context.Context, req adm
 			}
 			// Best-effort for a plain restore: no accessibility info available to propagate.
 		} else {
+			// sourceHost is used only when HostLocalStorage and PodVM v2 are both enabled: the
+			// source of a HostLocalStorage + PodVM v2 volume has zone-only accessible topology and
+			// carries its host MoID in the host mirror annotation. With HostLocalStorage alone,
+			// the source's accessible topology already carries kubernetes.io/hostname.
+			// Only a HostLocalStorage + PodVM v2 Supervisor writes the mirror, so the feature check
+			// runs only when it is present.
+			sourceHost := sourcePVC.Annotations[common.AttributeESXiHostMoID]
+			if sourceHost != "" && !commonco.IsHostLocalStorageAndPodVMV2Enabled(ctx, h.coCommonInterface) {
+				sourceHost = ""
+			}
+			if sourceHost != "" {
+				// Source affinity may be zone-only. Carry the physical host as a
+				// placement constraint, never as the target volume's result pin.
+				sourceTopology, err := common.GuestAccessibleTopology(sourcePVC)
+				if err != nil {
+					return admission.Denied("incomplete source host metadata: " + err.Error())
+				}
+				encoded, err := json.Marshal(sourceTopology)
+				if err != nil {
+					return admission.Denied(err.Error())
+				}
+				sourcePVCAccessibility = string(encoded)
+			}
 			// Case-1: If the PVC has "csi.vsphere.volume-requested-topology" annotation:
 			// - Validate that it overlaps with the source PVC's accessible zones, fail the
 			//   request if not; otherwise narrow the annotation down to just the overlap.
@@ -615,12 +638,20 @@ func (h *CSISupervisorMutationWebhook) mutateNewPVC(ctx context.Context, req adm
 						"request a zone where the source snapshot is accessible, if unset, it will be "+
 						"automatically chosen", sourcePVCAccessibility, newPVCAccessibility)
 					return admission.Denied(errMsg)
-				} else if !zoneSetsEqual(validZones, requestedZones) {
+				} else if !zoneSetsEqual(validZones, requestedZones) || sourceHost != "" {
 					// The requested zones included some the source isn't actually accessible
 					// from (e.g. an unnarrowed candidate list); narrow the annotation down to
 					// just the overlap so downstream CreateVolume pins to a zone that is both
 					// requested and reachable.
-					narrowedTopology, err := zonesToTopologyAnnotation(validZones)
+					var narrowedTopology string
+					if sourceHost != "" {
+						// HostLocalStorage + PodVM v2: keep complete requested segments and add the
+						// source host, so host/zone pairs and zone-only alternatives survive.
+						narrowedTopology, err = narrowRestoreTopologySegments(newPVCAccessibility, validZones,
+							sourceHost)
+					} else {
+						narrowedTopology, err = zonesToTopologyAnnotation(validZones)
+					}
 					if err != nil {
 						return admission.Denied("failed to construct narrowed " +
 							common.AnnGuestClusterRequestedTopology + ". err:" + err.Error())
