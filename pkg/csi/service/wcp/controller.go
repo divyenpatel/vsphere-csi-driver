@@ -699,6 +699,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		isLinkedCloneRequest      bool
 		linkedCloneSupportEnabled bool
 		isHostLocalRequest        bool
+		hostLocalTopology         string
 		// snapshotSourceHostMoRef is the ESX host that exclusively mounts the datastore of the
 		// snapshot's source volume, when restoring from a host-local volume. The restore is a disk
 		// copy that only that host can run, so the candidate host set is narrowed to it below.
@@ -742,6 +743,8 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 				return nil, csifault.CSIUnimplementedFault, logger.LogNewErrorCodef(log, codes.Unimplemented,
 					"linked clone volumes are not supported. Request: %+v", logger.RedactCSIRequest(req))
 			}
+		case common.AttributeHostLocalTopology:
+			hostLocalTopology = req.Parameters[paramName]
 		case common.AttributeHostLocalPolicy:
 			isHostLocalRequest = strings.EqualFold(req.Parameters[paramName], "true")
 		}
@@ -754,6 +757,11 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 			"host-local storage policy volume provisioning is not supported: "+
 				"supports_host_local_storage capability is not enabled. Request: %+v",
 			logger.RedactCSIRequest(req))
+	}
+
+	if hostLocalTopology != "" && (!isHostLocalRequest || !isHostLocalStorageSupportEnabled) {
+		return nil, csifault.CSIInvalidArgumentFault, status.Error(codes.InvalidArgument,
+			"physical host topology requires an enabled host-local storage policy")
 	}
 
 	// If VM_PVC_STORAGE_POLICY_MUTABILITY is enabled and mutable_parameters contains a
@@ -784,6 +792,9 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	isTKGSHAEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA)
 	isFCDTransactionSupportEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FCDTransactionSupport)
 
+	if isHostLocalRequest && !isTKGSHAEnabled {
+		return nil, csifault.CSIInvalidArgumentFault, status.Error(codes.FailedPrecondition, "host-local provisioning requires topology support")
+	}
 	topoSegToDatastoresMap := make(map[string][]*cnsvsphere.DatastoreInfo)
 	if isTKGSHAEnabled {
 		// topologyMgr can be nil if the AZ CR was not registered
@@ -810,7 +821,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		// In 9.x, it is not a supported use case. We require all supervisor clusters to use zone
 		// keys as topology requirement during volume provisioning.
 		hostnameLabelPresent, zoneLabelPresent = checkTopologyKeysFromAccessibilityReqs(topologyRequirement)
-		if zoneLabelPresent && hostnameLabelPresent {
+		if isHostLocalRequest || (zoneLabelPresent && hostnameLabelPresent) {
 			log.Infof("Host Local volume provisioning with requirement: %+v", topologyRequirement)
 			// CNS rejects a CnsVolumeCreateSpec that sets both `hosts` and `activeClusters`
 			// ("createSpecs.hosts and createSpecs.activeClusters cannot both be set"). For a
@@ -1165,11 +1176,30 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	var hostMoRefs []types.ManagedObjectReference
 	var hostMoIDToTopology map[string]map[string]string
 	if isHostLocalRequest {
-		hostMoRefs, hostMoIDToTopology, err = getHostMoRefsForHostLocalVolume(ctx, topologyRequirement,
-			commonco.GetNodeNameToHostMoIDsMap(ctx, commonco.ContainerOrchestratorUtility))
+		if hostLocalTopology == "" && hostnameLabelPresent &&
+			!commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMV2Support) {
+			// Preserve the dedicated-Node request path when PodVM v2 is disabled.
+			hostMoRefs, hostMoIDToTopology, err = getHostMoRefsForHostLocalVolume(ctx, topologyRequirement,
+				commonco.GetNodeNameToHostMoIDsMap(ctx, commonco.ContainerOrchestratorUtility))
+		} else {
+			var inventory map[string]map[string]string
+			inventory, err = c.hostLocalInventory(ctx, vc, pvcNamespace, topologyRequirement)
+			if err == nil {
+				hostMoRefs, hostMoIDToTopology, err = hostLocalCandidates(topologyRequirement, hostLocalTopology, inventory)
+			}
+		}
 		if err != nil {
 			log.Errorf("failed to resolve candidate hosts for host-local volume %q. Error: %+v", req.Name, err)
 			return nil, csifault.CSIInternalFault, err
+		}
+		if isLinkedCloneRequest && (hostLocalTopology != "" || !hostnameLabelPresent ||
+			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMV2Support)) {
+			snapshotSourceHostMoRef, err = c.getHostExclusiveSnapshotSourceHost(ctx,
+				req.GetVolumeContentSource().GetSnapshot().GetSnapshotId())
+			if err != nil || snapshotSourceHostMoRef == nil {
+				return nil, csifault.CSIInvalidArgumentFault, status.Errorf(codes.InvalidArgument,
+					"host-local linked clone requires a host-exclusive source datastore: %v", err)
+			}
 		}
 		if snapshotSourceHostMoRef != nil {
 			// Restoring from a host-exclusive datastore: only the host that mounts it can run the
