@@ -729,8 +729,8 @@ const (
 	// HostLocalStorageSupport is the WCP capability for host-local storage policy
 	// provisioning. When enabled on the supervisor, the CSI driver honors the
 	// hostLocalPolicy volume parameter, supplies target hosts to CNS in the
-	// CnsVolumeCreateSpec, and builds PV node affinity from the host returned in
-	// the CNS placement result.
+	// CnsVolumeCreateSpec, and returns zone-only Supervisor topology plus the
+	// actual backing host for mandatory PV pinning, independently of PodVM v2.
 	HostLocalStorageSupport = "supports_host_local_storage"
 	// HostLocalStorageSupportFSS is the pvCSI FSS paired with HostLocalStorageSupport
 	// on the supervisor.
@@ -740,7 +740,8 @@ const (
 	AttributeHostLocalTopology = "cns.vmware.com/host-local-topology"
 	// AttributeESXiHostMoID is the actual backing host returned by CNS and mirrored to the PVC.
 	AttributeESXiHostMoID = "cns.vmware.com/esxi-host-moid"
-	// AnnPodVMHostPinned is the durable physical placement constraint on a Supervisor PV.
+	// AnnPodVMHostPinned is the mandatory HostLocalStorage placement constraint
+	// on a Supervisor PV, independent of the PodVM v2 capability.
 	AnnPodVMHostPinned = "cns.vmware.com/podvm-host-pinned"
 
 	// PodVMV2Support indicates Supervisor support for cluster-backed virtual nodes.

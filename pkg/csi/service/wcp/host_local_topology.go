@@ -150,3 +150,23 @@ func (c *controller) hostLocalInventory(ctx context.Context, vc *cnsvsphere.Virt
 	}
 	return result, nil
 }
+
+// hostLocalVolumeResult keeps durable physical identity separate from schedulable
+// Supervisor topology. HostLocalStorage owns the zone-only affinity and host-pin
+// contract independently of PodVM v2. The validated source host is used only for linked clones.
+func hostLocalVolumeResult(ctx context.Context, linkedClone bool,
+	candidates []vimtypes.ManagedObjectReference, inventory map[string]map[string]string,
+	selected *vimtypes.ManagedObjectReference, volumeID string) (map[string]string, string, error) {
+	topology, err := resolveHostLocalAccessibleTopologySegments(ctx, linkedClone, candidates, inventory, selected, volumeID)
+	if err != nil {
+		return nil, "", err
+	}
+	host := selected
+	if linkedClone {
+		host = &candidates[0]
+	}
+	if host == nil || host.Type != "HostSystem" || host.Value == "" {
+		return nil, "", fmt.Errorf("invalid backing host for volume %q", volumeID)
+	}
+	return map[string]string{v1.LabelTopologyZone: topology[v1.LabelTopologyZone]}, host.Value, nil
+}
