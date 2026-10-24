@@ -439,6 +439,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	// populated by the node-driven resolver below; otherwise it is computed later from shared
 	// datastores in the IsPodVMOnStretchSupervisorFSSEnabled block.
 	var datastoreAccessibleTopology []map[string]string
+	var backingHost string
 
 	if isHostLocal {
 		// Bypass the shared-datastore "accessible to all hosts" gate. Build the clusterMoID -> zone
@@ -494,7 +495,10 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		}
 
 		// Derive the PV topology from Datastore.host[0] -> {zone (from host's cluster), hostname}.
-		datastoreAccessibleTopology, err = getHostLocalAccessibleTopologyFn(ctx, vc, dsInfo, clusterToZone)
+		datastoreAccessibleTopology, backingHost, err = getHostLocalAccessibleTopologyFn(ctx, vc, dsInfo, clusterToZone)
+		if err == nil {
+			datastoreAccessibleTopology, err = registeredHostTopology(datastoreAccessibleTopology, backingHost)
+		}
 		if err != nil {
 			log.Errorf("failed to resolve host-local topology for volume %s on datastore %s: %+v",
 				volumeID, volume.DatastoreUrl, err)
@@ -770,10 +774,18 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
 
+		if isHostLocal {
+			pvc, err = publishRegisteredPVCHost(ctx, k8sclient, pvc, backingHost, datastoreAccessibleTopology)
+			if err != nil {
+				setInstanceError(ctx, r, instance, err.Error())
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+		}
+
 		// Validate topology compatibility if PVC exists and can be reused. For host-local volumes the
 		// topology is already resolved (datastoreAccessibleTopology is non-empty) and topologyMgr is
 		// not consulted, so run the validation even when topologyMgr is nil (e.g. non-stretched
-		// supervisor) to ensure the reused PVC gets the {zone, hostname} annotation.
+		// supervisor). The reused PVC carries zone-only accessibility and a separate host mirror.
 		if topologyMgr != nil || isHostLocal {
 			err = validatePVCTopologyCompatibility(ctx, k8sclient, pvc, volume.DatastoreUrl, topologyMgr, vc,
 				datastoreAccessibleTopology, isHostLocal)
@@ -841,6 +853,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 				accessMode, instance.Spec.VolumeMode, storageClassName, claimRef,
 				instance.Namespace, instance.Name)
 			pvSpec.Spec.NodeAffinity = pvNodeAffinity
+			setRegisteredPVHost(pvSpec, backingHost)
 			log.Debugf("PV spec is: %+v", pvSpec)
 			pv, err = k8sclient.CoreV1().PersistentVolumes().Create(ctx, pvSpec, metav1.CreateOptions{})
 			if err != nil {
@@ -859,8 +872,19 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	} else {
 		// PV exists - check if volumeMode needs correction
 		pv, err = validateAndFixPVVolumeMode(ctx, k8sclient, r, instance, pv, pvName, volumeID, pvCapacity,
-			accessMode, storageClassName, pvNodeAffinity, timeout)
+			accessMode, storageClassName, pvNodeAffinity, timeout, registrationHostMetadata{Host: backingHost})
 		if err != nil {
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+	}
+	if isHostLocal {
+		if pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle != volumeID {
+			setInstanceError(ctx, r, instance, "existing PV references a different volume")
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+		pv, err = reconcileRegisteredPVHost(ctx, k8sclient, pv, backingHost)
+		if err != nil {
+			setInstanceError(ctx, r, instance, err.Error())
 			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
 	}
@@ -914,6 +938,9 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			log.Errorf(msg)
 			setInstanceError(ctx, r, instance, msg)
 			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+		if backingHost != "" {
+			metav1.SetMetaDataAnnotation(&pvcSpec.ObjectMeta, common.AttributeESXiHostMoID, backingHost)
 		}
 		log.Debugf("PVC spec is: %+v", pvcSpec)
 		pvc, err = k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Create(ctx,
@@ -1344,7 +1371,7 @@ func validateAndFixPVVolumeMode(ctx context.Context, k8sclient clientset.Interfa
 	r *ReconcileCnsRegisterVolume, instance *cnsregistervolumev1alpha1.CnsRegisterVolume,
 	pv *v1.PersistentVolume, pvName, volumeID string, pvCapacity resource.Quantity,
 	accessMode v1.PersistentVolumeAccessMode, storageClassName string,
-	pvNodeAffinity *v1.VolumeNodeAffinity, timeout time.Duration) (*v1.PersistentVolume, error) {
+	pvNodeAffinity *v1.VolumeNodeAffinity, timeout time.Duration, hostMetadata ...registrationHostMetadata) (*v1.PersistentVolume, error) {
 	log := logger.GetLogger(ctx)
 
 	// Determine expected volumeMode
@@ -1421,6 +1448,9 @@ func validateAndFixPVVolumeMode(ctx context.Context, k8sclient clientset.Interfa
 			accessMode, instance.Spec.VolumeMode, storageClassName, claimRef,
 			instance.Namespace, instance.Name)
 		pvSpec.Spec.NodeAffinity = pvNodeAffinity
+		if len(hostMetadata) > 0 {
+			setRegisteredPVHost(pvSpec, hostMetadata[0].Host)
+		}
 		log.Debugf("Recreating PV with spec: %+v", pvSpec)
 		pv, err = k8sclient.CoreV1().PersistentVolumes().Create(ctx, pvSpec, metav1.CreateOptions{})
 		if err != nil {
