@@ -228,10 +228,64 @@ func getHostLocalAccessibleTopology(ctx context.Context, vc *vsphere.VirtualCent
 	return []map[string]string{segment}, nil
 }
 
+// getHostLocalPodVMV2AccessibleTopologyFn is getHostLocalPodVMV2AccessibleTopology, declared
+// as a variable so tests can substitute a fake implementation.
+var getHostLocalPodVMV2AccessibleTopologyFn = getHostLocalPodVMV2AccessibleTopology
+
+// getHostLocalPodVMV2AccessibleTopology is used only when HostLocalStorage and PodVM v2 are
+// both enabled. It returns zone-only affinity and the physical host
+// identity used to pin a host-local PV. vCenter supplies the exclusive datastore
+// mount and its parent cluster; clusterToZone supplies the namespace's zone.
+// No Supervisor Node name or VirtualNode membership is needed for registration.
+// Missing/ambiguous mounts or a cluster without a zone mapping fail registration.
+func getHostLocalPodVMV2AccessibleTopology(ctx context.Context, vc *vsphere.VirtualCenter,
+	dsInfo *vsphere.DatastoreInfo, clusterToZone map[string]string) ([]map[string]string, string, error) {
+	log := logger.GetLogger(ctx)
+
+	// Datastore.host[0]: the ESX host that mounts the host-local datastore.
+	var dsMo mo.Datastore
+	if err := dsInfo.Properties(ctx, dsInfo.Reference(), []string{"host"}, &dsMo); err != nil {
+		return nil, "", logger.LogNewErrorf(log,
+			"failed to retrieve host mounts for datastore %q: %v", dsInfo.Info.Url, err)
+	}
+	if len(dsMo.Host) != 1 {
+		return nil, "", logger.LogNewErrorf(log,
+			"host-local datastore %q must have exactly one host mount", dsInfo.Info.Url)
+	}
+	hostRef := dsMo.Host[0].Key
+
+	// zone: derive from the cluster the host belongs to (host.parent).
+	hostObj := object.NewHostSystem(vc.Client.Client, hostRef)
+	var hostMo mo.HostSystem
+	if err := hostObj.Properties(ctx, hostRef, []string{"parent"}, &hostMo); err != nil {
+		return nil, "", logger.LogNewErrorf(log,
+			"failed to retrieve parent cluster for ESX host %q: %v", hostRef.Value, err)
+	}
+	if hostMo.Parent == nil {
+		return nil, "", logger.LogNewErrorf(log,
+			"ESX host %q backing host-local datastore %q has no parent cluster", hostRef.Value, dsInfo.Info.Url)
+	}
+	zone, ok := clusterToZone[hostMo.Parent.Value]
+	if !ok || zone == "" {
+		return nil, "", logger.LogNewErrorf(log,
+			"no zone mapping found for cluster %q (host %q); host-local registration requires a "+
+				"zone derived from the host's cluster", hostMo.Parent.Value, hostRef.Value)
+	}
+
+	segment := map[string]string{
+		v1.LabelTopologyZone: zone,
+	}
+	log.Infof("host-local datastore %q resolved to host %q in cluster %q, topology: %+v",
+		dsInfo.Info.Url, hostRef.Value, hostMo.Parent.Value, segment)
+	return []map[string]string{segment}, hostRef.Value, nil
+}
+
 // buildNodeAffinityFromSegments builds a PV VolumeNodeAffinity from topology segments.
 // Each segment contributes one NodeSelectorTerm whose match expressions require every
 // segment key to equal its value (In operator), so both the zone and hostname keys of a
-// host-local segment become required node-selector terms on the PV.
+// HostLocalStorage segment become required node-selector terms on the PV. With
+// HostLocalStorage + PodVM v2 the segment is zone-only and physical host pinning is carried
+// separately in host-local PV annotations.
 func buildNodeAffinityFromSegments(segments []map[string]string) *v1.VolumeNodeAffinity {
 	if len(segments) == 0 {
 		return nil

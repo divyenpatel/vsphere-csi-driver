@@ -29,6 +29,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
 	"github.com/vmware/govmomi"
 	cnstypes "github.com/vmware/govmomi/cns/types"
@@ -73,6 +74,7 @@ import (
 )
 
 type mockVolumeManager struct {
+	queryResult      *cnstypes.CnsQueryResult
 	createVolumeFunc func(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec,
 		ctxParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error)
 	unregisterVolume func(ctx context.Context, volumeID string,
@@ -247,6 +249,9 @@ func (m *mockVolumeManager) BatchAttachVolumes(ctx context.Context,
 
 func (m *mockVolumeManager) QueryVolumeAsync(ctx context.Context, queryFilter cnstypes.CnsQueryFilter,
 	querySelection *cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error) {
+	if m.queryResult != nil {
+		return m.queryResult, nil
+	}
 	return &cnstypes.CnsQueryResult{
 		Volumes: []cnstypes.CnsVolume{
 			{
@@ -381,8 +386,12 @@ func (m *mockCOCommon) GetNodeIDtoNameMap(ctx context.Context) (map[string]strin
 // nodeNameToHostMoIDMapOverride lets host-local tests supply a fixed node-name -> host-MoID map.
 var nodeNameToHostMoIDMapOverride map[string]string
 
+// podVMV2EnabledAtStartupOverride lets a test enable PodVM v2 (mockCOCommon.IsPodVMV2EnabledAtStartup)
+// to select HostLocalStorage + PodVM v2.
+var podVMV2EnabledAtStartupOverride bool
+
 func (m *mockCOCommon) IsPodVMV2EnabledAtStartup(ctx context.Context) bool {
-	return false
+	return podVMV2EnabledAtStartupOverride
 }
 
 func (m *mockCOCommon) GetNodeNameToHostMoIDMap(ctx context.Context) map[string]string {
@@ -5402,4 +5411,239 @@ func TestClearStaleDeleteOperationRecord(t *testing.T) {
 		assert.NotPanics(t, func() { r.clearStaleDeleteOperationRecord(ctx, "vol-1") })
 		assert.Equal(t, 1, deleteCalls)
 	})
+}
+
+// TestGetHostLocalPodVMV2AccessibleTopology verifies the HostLocalStorage + PodVM v2 resolver:
+// host identity from the datastore mount and zone affinity from its parent cluster,
+// independent of Node ownership.
+func TestGetHostLocalPodVMV2AccessibleTopology(t *testing.T) {
+	ctx := context.Background()
+	commonco.ContainerOrchestratorUtility = &mockCOCommon{}
+	vc := newFakeVCWithClient()
+
+	t.Run("resolves zone and host pin from vCenter", func(t *testing.T) {
+		nodeNameToHostMoIDMapOverride = map[string]string{"esx-node-2": "host-22"}
+		defer func() { nodeNameToHostMoIDMapOverride = nil }()
+
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		patchDatastoreAndHostProperties(patches, "host-22", "cluster-a", false)
+
+		dsInfo := newHostLocalDatastoreInfo(vc, "hl-ds-url")
+		topology, host, err := getHostLocalPodVMV2AccessibleTopology(ctx, vc, dsInfo,
+			map[string]string{"cluster-a": "zone-a"})
+		assert.NoError(t, err)
+		assert.Len(t, topology, 1)
+		assert.Equal(t, "host-22", host)
+		assert.NotContains(t, topology[0], corev1.LabelHostname)
+		assert.Equal(t, "zone-a", topology[0][corev1.LabelTopologyZone])
+	})
+
+	t.Run("errors when datastore has no host mounts", func(t *testing.T) {
+		nodeNameToHostMoIDMapOverride = map[string]string{"esx-node-2": "host-22"}
+		defer func() { nodeNameToHostMoIDMapOverride = nil }()
+
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		patchDatastoreAndHostProperties(patches, "host-22", "cluster-a", true)
+
+		dsInfo := newHostLocalDatastoreInfo(vc, "hl-ds-url")
+		_, _, err := getHostLocalPodVMV2AccessibleTopology(ctx, vc, dsInfo, map[string]string{"cluster-a": "zone-a"})
+		assert.Error(t, err)
+	})
+
+	t.Run("succeeds without a matching supervisor node", func(t *testing.T) {
+		nodeNameToHostMoIDMapOverride = map[string]string{"esx-node-1": "host-11"}
+		defer func() { nodeNameToHostMoIDMapOverride = nil }()
+
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		patchDatastoreAndHostProperties(patches, "host-22", "cluster-a", false)
+
+		dsInfo := newHostLocalDatastoreInfo(vc, "hl-ds-url")
+		topology, host, err := getHostLocalPodVMV2AccessibleTopology(ctx, vc, dsInfo,
+			map[string]string{"cluster-a": "zone-a"})
+		assert.NoError(t, err)
+		assert.Equal(t, "host-22", host)
+		assert.Equal(t, []map[string]string{{corev1.LabelTopologyZone: "zone-a"}}, topology)
+	})
+
+	t.Run("errors when host cluster has no zone mapping", func(t *testing.T) {
+		nodeNameToHostMoIDMapOverride = map[string]string{"esx-node-2": "host-22"}
+		defer func() { nodeNameToHostMoIDMapOverride = nil }()
+
+		patches := gomonkey.NewPatches()
+		defer patches.Reset()
+		patchDatastoreAndHostProperties(patches, "host-22", "cluster-a", false)
+
+		dsInfo := newHostLocalDatastoreInfo(vc, "hl-ds-url")
+		// clusterToZone does not contain cluster-a -> registration must fail.
+		_, _, err := getHostLocalPodVMV2AccessibleTopology(ctx, vc, dsInfo, map[string]string{"cluster-x": "zone-x"})
+		assert.Error(t, err)
+	})
+}
+
+// Exercise Reconcile through the actual Kubernetes PV Create call, rather than
+// just testing metadata helpers. The fake binder and policy assignment isolate
+// this test from controllers and vCenter services outside CNSRegisterVolume.
+func TestReconcileHostLocalPVCreateContract(t *testing.T) {
+	for _, mode := range []struct {
+		name, node string
+		podVMV2    bool
+	}{
+		{name: "HostLocalStorage only", node: "esx-node-1"},
+		{name: "HostLocalStorage and PodVM v2 before host upgrade", node: "esx-node-1", podVMV2: true},
+		{name: "HostLocalStorage and PodVM v2 on VirtualNode", node: "virtual-node-domain-c1", podVMV2: true},
+	} {
+		for _, replacePV := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/replacePV=%t", mode.name, replacePV), func(t *testing.T) {
+				testReconcileHostLocalPVCreateContract(t, mode.node, mode.podVMV2, replacePV)
+			})
+		}
+	}
+}
+
+// testReconcileHostLocalPVCreateContract registers a host-local volume and checks the initial
+// PV Create:
+//   - HostLocalStorage only: zone + hostname affinity, no host pin, no host mirror on the PVC;
+//   - HostLocalStorage + PodVM v2: zone-only affinity plus the mandatory host pin and mirror.
+func testReconcileHostLocalPVCreateContract(t *testing.T, node string, podVMV2, replacePV bool) {
+	ctx := context.Background()
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+	oldCO, oldFSS := commonco.ContainerOrchestratorUtility, fssEnabledOverride
+	oldStretch, oldShared := syncer.IsPodVMOnStretchSupervisorFSSEnabled, isSharedDiskEnabled
+	oldBackoff := backOffDuration
+	oldCompatibility, oldTopology := checkDatastorePolicyCompatibilityFn, getHostLocalAccessibleTopologyFn
+	oldPodVMV2Topology, oldPodVMV2 := getHostLocalPodVMV2AccessibleTopologyFn, podVMV2EnabledAtStartupOverride
+	oldTopologyMgr := topologyMgr
+	defer func() {
+		commonco.ContainerOrchestratorUtility, fssEnabledOverride = oldCO, oldFSS
+		syncer.IsPodVMOnStretchSupervisorFSSEnabled, isSharedDiskEnabled = oldStretch, oldShared
+		backOffDuration = oldBackoff
+		checkDatastorePolicyCompatibilityFn, getHostLocalAccessibleTopologyFn = oldCompatibility, oldTopology
+		getHostLocalPodVMV2AccessibleTopologyFn, podVMV2EnabledAtStartupOverride = oldPodVMV2Topology, oldPodVMV2
+		topologyMgr = oldTopologyMgr
+	}()
+	r, setErrCalled, _ := newHostLocalReconcileFixture(patches, "HostLocalStorage")
+	topologyMgr = nil
+	// QueryVolumeByID is an inlineable wrapper; inject the backend result
+	// through its Manager interface instead of depending on a binary patch.
+	r.volumeManager.(*mockVolumeManager).queryResult = &cnstypes.CnsQueryResult{Volumes: []cnstypes.CnsVolume{{
+		VolumeId:        cnstypes.CnsVolumeId{Id: "dummy-volume-id"},
+		StoragePolicyId: "host-local-policy-id",
+		DatastoreUrl:    "host-local-ds-url",
+		BackingObjectDetails: &cnstypes.CnsBlockBackingDetails{
+			CnsBackingObjectDetails: cnstypes.CnsBackingObjectDetails{CapacityInMb: 1024}},
+	}}}
+	fssEnabledOverride = func(feature string) bool { return feature == common.HostLocalStorageSupport }
+	podVMV2EnabledAtStartupOverride = podVMV2
+	syncer.IsPodVMOnStretchSupervisorFSSEnabled = false
+	isSharedDiskEnabled = true
+	checkDatastorePolicyCompatibilityFn = func(context.Context, *cnsvsphere.VirtualCenter,
+		*cnsvsphere.DatastoreInfo, string) (bool, error) {
+		return true, nil
+	}
+	// HostLocalStorage resolver: zone + hostname of the Supervisor Node that owns the host.
+	getHostLocalAccessibleTopologyFn = func(context.Context, *cnsvsphere.VirtualCenter, *cnsvsphere.DatastoreInfo,
+		map[string]string) ([]map[string]string, error) {
+		require.False(t, podVMV2, "the HostLocalStorage resolver must not run with PodVM v2")
+		return []map[string]string{{corev1.LabelTopologyZone: "zone-1", corev1.LabelHostname: node}}, nil
+	}
+	// HostLocalStorage + PodVM v2 resolver: zone-only topology plus the host MoID.
+	getHostLocalPodVMV2AccessibleTopologyFn = func(context.Context, *cnsvsphere.VirtualCenter,
+		*cnsvsphere.DatastoreInfo, map[string]string) ([]map[string]string, string, error) {
+		require.True(t, podVMV2, "the PodVM v2 resolver must run only with PodVM v2")
+		return []map[string]string{{corev1.LabelTopologyZone: "zone-1"}}, "host-45", nil
+	}
+	patches.ApplyFunc(resolveStorageClassNameForRegistration, func(context.Context, kubernetes.Interface,
+		ctrlclient.Client, *cnsregistervolumev1alpha1.CnsRegisterVolume, *corev1.PersistentVolumeClaim,
+		string, string, bool) (string, error) {
+		return "local", nil
+	})
+	patches.ApplyFunc(isPVCBoundNow, func(context.Context, kubernetes.Interface,
+		*corev1.PersistentVolumeClaim) (bool, error) {
+		return true, nil
+	})
+	patches.ApplyFunc(setInstanceSuccess, func(context.Context, *ReconcileCnsRegisterVolume,
+		*cnsregistervolumev1alpha1.CnsRegisterVolume, string, types.UID, string) error {
+		return nil
+	})
+	client := r.k8sclient.(*k8sfake.Clientset)
+	_, err := client.StorageV1().StorageClasses().Create(ctx,
+		&storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "local"}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+	key := types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}
+	pvName := staticPvNamePrefix + "dummy-volume-id"
+	// Registration submits the CNS task asynchronously. Start from the pass that runs
+	// after the task completed, so the PV contract is exercised without a task tracker.
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+	require.NoError(t, r.client.Get(ctx, key, instance))
+	if replacePV {
+		instance.Spec.VolumeMode = corev1.PersistentVolumeBlock
+		require.NoError(t, r.client.Update(ctx, instance))
+	}
+	instance.Status.CnsVolumeID = "dummy-volume-id"
+	require.NoError(t, r.client.Status().Update(ctx, instance))
+	if replacePV {
+		filesystem := corev1.PersistentVolumeFilesystem
+		_, err := client.CoreV1().PersistentVolumes().Create(ctx,
+			&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: pvName},
+				Spec: corev1.PersistentVolumeSpec{VolumeMode: &filesystem}}, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	wantSegments := []map[string]string{{corev1.LabelTopologyZone: "zone-1"}}
+	wantHost := "host-45"
+	if !podVMV2 {
+		wantSegments = []map[string]string{{corev1.LabelTopologyZone: "zone-1", corev1.LabelHostname: node}}
+		wantHost = ""
+	}
+	wantAffinity := nodeAffinityTerms(buildNodeAffinityFromSegments(wantSegments))
+	creates := 0
+	client.PrependReactor("create", "persistentvolumes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		pv := action.(k8stesting.CreateAction).GetObject().(*corev1.PersistentVolume)
+		creates++
+		require.Equal(t, wantAffinity, nodeAffinityTerms(pv.Spec.NodeAffinity), "unexpected initial PV affinity")
+		require.Equal(t, wantHost, pv.Annotations[common.AnnPodVMHostPinned],
+			"host pin cannot be deferred until a later patch")
+		require.Equal(t, wantHost, pv.Spec.CSI.VolumeAttributes[common.AttributeESXiHostMoID])
+		return false, nil, nil
+	})
+	client.ClearActions()
+	result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.Equal(t, reconcile.Result{}, result)
+	require.False(t, *setErrCalled)
+	require.Equal(t, 1, creates)
+	pv, err := client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, wantAffinity, nodeAffinityTerms(pv.Spec.NodeAffinity))
+	require.Equal(t, wantHost, pv.Annotations[common.AnnPodVMHostPinned])
+	pvc, err := client.CoreV1().PersistentVolumeClaims(key.Namespace).Get(ctx, "test-pvc", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, wantHost, pvc.Annotations[common.AttributeESXiHostMoID])
+	var accessible []map[string]string
+	require.NoError(t, json.Unmarshal([]byte(pvc.Annotations[common.AnnVolumeAccessibleTopology]), &accessible))
+	require.Equal(t, wantSegments, accessible)
+	for _, action := range client.Actions() {
+		require.False(t, action.GetVerb() == "patch" && action.GetResource().Resource == "persistentvolumes",
+			"new PV must not need an affinity or pin patch")
+	}
+}
+
+// nodeAffinityTerms flattens each required node-selector term into a key -> values map, so
+// affinity can be compared regardless of match-expression order.
+func nodeAffinityTerms(affinity *corev1.VolumeNodeAffinity) []map[string][]string {
+	if affinity == nil || affinity.Required == nil {
+		return nil
+	}
+	var terms []map[string][]string
+	for _, term := range affinity.Required.NodeSelectorTerms {
+		expressions := make(map[string][]string, len(term.MatchExpressions))
+		for _, expr := range term.MatchExpressions {
+			expressions[expr.Key] = expr.Values
+		}
+		terms = append(terms, expressions)
+	}
+	return terms
 }
