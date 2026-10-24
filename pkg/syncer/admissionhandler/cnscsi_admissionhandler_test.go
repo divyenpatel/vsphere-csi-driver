@@ -1878,3 +1878,114 @@ func TestMutateNewPVC_PlainSnapshotRestore_CrossNamespaceDataSource_Denied(t *te
 	assert.NotContains(t, response.Result.Message, "tenant-b")
 	mockCOInterface.AssertNotCalled(t, "GetVolumeSnapshotPVCSource", mock.Anything, mock.Anything, mock.Anything)
 }
+
+func TestMutateNewPVC_HostLocalSource_UsesBackingHost(t *testing.T) {
+	ctx := context.Background()
+
+	originalFeatureGate := featureIsLinkedCloneSupportEnabled
+	featureIsLinkedCloneSupportEnabled = true
+	defer func() {
+		featureIsLinkedCloneSupportEnabled = originalFeatureGate
+	}()
+
+	// No linked-clone annotation, and no annotations map whatsoever.
+	testPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "restored-pvc",
+			Namespace: "default",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+			DataSource: &corev1.TypedLocalObjectReference{
+				Name:     "vs-1",
+				Kind:     "VolumeSnapshot",
+				APIGroup: func() *string { s := common.VolumeSnapshotApiGroup; return &s }(),
+			},
+			StorageClassName: &[]string{"other-storage-profile"}[0],
+		},
+	}
+
+	sourcePVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "src-pvc",
+			Namespace: "default",
+			Annotations: map[string]string{
+				common.AnnVolumeAccessibleTopology: `[{"topology.kubernetes.io/zone":"zone-1"}]`,
+				common.AttributeESXiHostMoID:       "host-45",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("1Gi"),
+				},
+			},
+			StorageClassName: &[]string{"wcpglobal-storage-profile"}[0],
+		},
+	}
+
+	dataSourceRef := &corev1.ObjectReference{
+		Name:       "vs-1",
+		Namespace:  "default",
+		Kind:       "VolumeSnapshot",
+		APIVersion: common.VolumeSnapshotApiGroup,
+	}
+
+	pvcBytes, _ := json.Marshal(testPVC)
+	req := admission.Request{
+		AdmissionRequest: v1.AdmissionRequest{
+			Kind:      metav1.GroupVersionKind{Kind: "PersistentVolumeClaim"},
+			Operation: v1.Create,
+			Object:    runtime.RawExtension{Raw: pvcBytes},
+		},
+	}
+
+	mockCOInterface := &MockCOCommonInterface{}
+	mockCryptoClient := &MockCryptoClient{}
+	mockCOInterface.On("GetVolumeSnapshotPVCSource", ctx, "default", "vs-1").Return(sourcePVC, nil)
+
+	patches := gomonkey.ApplyFunc(
+		k8sorchestrator.GetPVCDataSource, func(ctx context.Context,
+			pvc *corev1.PersistentVolumeClaim) (*corev1.ObjectReference, error) {
+			return dataSourceRef, nil
+		})
+	defer patches.Reset()
+
+	webhook := &CSISupervisorMutationWebhook{
+		coCommonInterface: mockCOInterface,
+		CryptoClient:      mockCryptoClient,
+	}
+
+	// Must not panic even though the incoming PVC has a nil annotations map.
+	var response admission.Response
+	assert.NotPanics(t, func() {
+		response = webhook.mutateNewPVC(ctx, req)
+	})
+
+	// The request is allowed and patched with the source PVC's accessible topology.
+	assert.True(t, response.Allowed)
+	assert.NotEmpty(t, response.Patches)
+
+	// The patch creates the annotations map and carries the source PVC's topology verbatim.
+	assert.Equal(t, 1, len(response.Patches))
+	assert.Equal(t, "/metadata/annotations", response.Patches[0].Path)
+	patchJSON, err := json.Marshal(response.Patches)
+	assert.NoError(t, err)
+	assert.Contains(t, string(patchJSON), common.AnnGuestClusterRequestedTopology)
+	assert.Contains(t, string(patchJSON), "zone-1")
+	assert.Contains(t, string(patchJSON), "host-45")
+	assert.Contains(t, string(patchJSON), common.GuestClusterTopologyLabelHost)
+	assert.NotContains(t, string(patchJSON), common.AnnPodVMHostPinned)
+	assert.NotContains(t, string(patchJSON), common.AttributeESXiHostMoID)
+
+	// No linked-clone label is added for a plain restore.
+	assert.NotContains(t, string(patchJSON), common.LinkedClonePVCLabel)
+
+	mockCOInterface.AssertExpectations(t)
+}
