@@ -449,15 +449,7 @@ func AddNodeAffinityRulesOnPV(ctx context.Context, metadataSyncer *metadataSyncI
 			}
 			var csiAccessibleTopology []*csi.Topology
 			for _, topoSegments := range accessibleTopologies {
-				// Translate the hostname key back to the VKS host key when present,
-				// unconditionally: this backstop can run long after volume creation,
-				// potentially after the host-local-storage-support FSS/capability was
-				// toggled off, but the volume's host pinning in CNS is still real and
-				// must still be reflected in the Guest PV's node affinity.
-				volumeTopology := &csi.Topology{
-					Segments: translateTopologyHostKey(topoSegments, v1.LabelHostname,
-						common.GuestClusterTopologyLabelHost, true),
-				}
+				volumeTopology := &csi.Topology{Segments: topoSegments}
 				csiAccessibleTopology = append(csiAccessibleTopology, volumeTopology)
 			}
 			oldData, err := json.Marshal(pv)

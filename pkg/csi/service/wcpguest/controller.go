@@ -463,10 +463,10 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 		}
 		// isHostLocalStorageSupportFSSEnabled ANDs the pvCSI-side host-local-storage-support FSS
 		// with the Supervisor's supports_host_local_storage capability, via
-		// common.WCPFeatureStateAssociatedWithPVCSI. Used both when building the requested-topology
-		// annotation below and when building the accessible-topology response after the Supervisor
-		// PVC is bound.
-		isHostLocalStorageSupportFSSEnabled := commonco.ContainerOrchestratorUtility.IsPVCSIFSSEnabled(ctx,
+		// common.WCPFeatureStateAssociatedWithPVCSI. Use the effective gate to validate
+		// and build requested topology. Bound-volume topology is read from durable
+		// Supervisor metadata independently of subsequent feature-switch changes.
+		isHostLocalStorageSupportFSSEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
 			common.HostLocalStorageSupportFSS)
 
 		// Get PVC name and disk size for the supervisor cluster
@@ -647,7 +647,6 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 					// topology constraint the guest scheduler required (e.g. a pod already bound to
 					// a specific node via WaitForFirstConsumer), which is worse than failing fast.
 					// Mirrors the equivalent rejection in pkg/csi/service/wcp/controller.go.
-					translatedPreferred := make([]*csi.Topology, 0, len(filteredPreferred))
 					for _, t := range filteredPreferred {
 						if _, hasHostKey := t.Segments[common.GuestClusterTopologyLabelHost]; hasHostKey &&
 							!isHostLocalStorageSupportFSSEnabled {
@@ -657,13 +656,9 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 								logger.RedactCSIRequest(req))
 							return nil, csifault.CSIUnimplementedFault, status.Error(codes.Unimplemented, msg)
 						}
-						translatedPreferred = append(translatedPreferred, &csi.Topology{
-							Segments: translateTopologyHostKey(t.Segments, common.GuestClusterTopologyLabelHost,
-								corev1.LabelHostname, true),
-						})
 					}
 					// Generate volume topology requirement annotation.
-					topologyAnnotation, err := generateGuestClusterRequestedTopologyJSON(translatedPreferred)
+					topologyAnnotation, err := generateGuestClusterRequestedTopologyJSON(filteredPreferred)
 					if err != nil {
 						msg := fmt.Sprintf("failed to generate accessibility topology for pvc with name: %s "+
 							"on namespace: %s from supervisorCluster. Error: %+v",
@@ -834,19 +829,9 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			log.Infof("Volume %q created is accessible from zones: %+v", supervisorPVCName,
 				accessibleTopologies)
 
-			// Add topology segments to the CreateVolumeResponse. The hostname key is always
-			// translated back to the VKS host key when present, regardless of the current
-			// host-local-storage-support FSS/capability state: by this point the volume's host
-			// pinning in CNS (if any) is already a committed fact, so dropping the key here
-			// (e.g. on an idempotent retry against an already-bound PVC, or if the
-			// FSS/capability was toggled off after the volume was created) would misrepresent
-			// it and could let Kubernetes schedule the pod where the volume can't attach.
-			for _, topoSegments := range accessibleTopologies {
-				volumeTopology := &csi.Topology{
-					Segments: translateTopologyHostKey(topoSegments, corev1.LabelHostname,
-						common.GuestClusterTopologyLabelHost, true),
-				}
-				resp.Volume.AccessibleTopology = append(resp.Volume.AccessibleTopology, volumeTopology)
+			// The Supervisor PVC host mirror supplies the physical MoID in both Node models.
+			for _, segments := range accessibleTopologies {
+				resp.Volume.AccessibleTopology = append(resp.Volume.AccessibleTopology, &csi.Topology{Segments: segments})
 			}
 		}
 		// Volume is created, remove the provisioning error recorded by an earlier attempt, if any.
