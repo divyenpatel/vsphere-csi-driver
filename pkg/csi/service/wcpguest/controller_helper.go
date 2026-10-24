@@ -291,30 +291,6 @@ func constructVolumeSnapshotWithVolumeSnapshotClass(volumeSnapshotName string, n
 	return volumeSnapshot
 }
 
-// translateTopologyHostKey returns a copy of segments with fromKey renamed to
-// toKey. If keepHostKey is false, fromKey is dropped instead of renamed
-// (used when the host-local FSS/capability is disabled, so a host-scoped
-// key is never forwarded across the guest/supervisor boundary where the
-// other side wouldn't recognize it, or would misinterpret its value).
-// Segments without fromKey are returned unchanged.
-func translateTopologyHostKey(segments map[string]string, fromKey, toKey string,
-	keepHostKey bool) map[string]string {
-	val, ok := segments[fromKey]
-	if !ok {
-		return segments
-	}
-	translated := make(map[string]string, len(segments))
-	for k, v := range segments {
-		if k != fromKey {
-			translated[k] = v
-		}
-	}
-	if keepHostKey {
-		translated[toKey] = val
-	}
-	return translated
-}
-
 // getWorkerNodeHostValues lists guest cluster Nodes and returns the set of
 // distinct common.GuestClusterTopologyLabelHost values observed on worker
 // nodes (i.e. nodes without common.ControlPlaneNodeRoleLabel). Host values
@@ -461,19 +437,7 @@ func validateGuestClusterRequestedTopologyAnnotation(value string) (string, erro
 // PVC annotation "csi.vsphere.volume-accessible-topology".
 func generateVolumeAccessibleTopologyFromPVCAnnotation(claim *v1.PersistentVolumeClaim) (
 	[]map[string]string, error) {
-	volumeAccessibleTopology := claim.Annotations[common.AnnVolumeAccessibleTopology]
-	if volumeAccessibleTopology == "" {
-		return nil, fmt.Errorf("annotation %q is not set for the claim: %q, namespace: %q",
-			common.AnnVolumeAccessibleTopology, claim.Name, claim.Namespace)
-	}
-	volumeAccessibleTopologyArray := make([]map[string]string, 0)
-	err := json.Unmarshal([]byte(volumeAccessibleTopology), &volumeAccessibleTopologyArray)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse annotation: %q value %v from the claim: %q, namespace: %q. "+
-			"err: %v", common.AnnVolumeAccessibleTopology, volumeAccessibleTopology,
-			claim.Name, claim.Namespace, err)
-	}
-	return volumeAccessibleTopologyArray, nil
+	return common.GuestAccessibleTopology(claim)
 }
 
 // isPVCInSupervisorClusterBound waits until the PVC reaches the Bound phase in
