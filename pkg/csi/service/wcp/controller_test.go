@@ -1571,6 +1571,15 @@ func (f *fakeCOOverrides) GetNodeNameToHostMoIDMap(ctx context.Context) map[stri
 	return f.nodeNameToHostMoID
 }
 
+// IsPodVMV2EnabledAtStartup honors an fssOverrides entry for the PodVM v2 capability so a
+// test can select HostLocalStorage only or HostLocalStorage + PodVM v2.
+func (f *fakeCOOverrides) IsPodVMV2EnabledAtStartup(ctx context.Context) bool {
+	if enabled, ok := f.fssOverrides[common.PodVMV2Support]; ok {
+		return enabled
+	}
+	return f.COCommonInterface.IsPodVMV2EnabledAtStartup(ctx)
+}
+
 func (f *fakeCOOverrides) GetActiveClustersForNamespaceInRequestedZones(ctx context.Context,
 	targetNS string, requestedZones []string) ([]string, error) {
 	return f.clusters, f.err
@@ -3736,4 +3745,64 @@ func TestCreateBlockVolumeVACPolicyOverride(t *testing.T) {
 		t.Fatalf("expected storage policy %q (VAC policy from mutable_parameters), got %q",
 			vacPolicyID, queryResult.Volumes[0].StoragePolicyId)
 	}
+}
+
+// TestHostLocalTopologyParameterRequiresHostLocalStorageAndPodVMV2 checks that the
+// cns.vmware.com/host-local-topology parameter is rejected with HostLocalStorage alone and is
+// accepted only when HostLocalStorage and PodVM v2 are both enabled.
+func TestHostLocalTopologyParameterRequiresHostLocalStorageAndPodVMV2(t *testing.T) {
+	ct := getControllerTest(t)
+	originalCO := commonco.ContainerOrchestratorUtility
+	originalHostLocalSupport := isHostLocalStorageSupportEnabled
+	t.Cleanup(func() {
+		commonco.ContainerOrchestratorUtility = originalCO
+		isHostLocalStorageSupportEnabled = originalHostLocalSupport
+	})
+	isHostLocalStorageSupportEnabled = true
+
+	req := func() *csi.CreateVolumeRequest {
+		return &csi.CreateVolumeRequest{
+			Name:          testVolumeName + "-" + uuid.New().String(),
+			CapacityRange: &csi.CapacityRange{RequiredBytes: 1 * common.GbInBytes},
+			Parameters: map[string]string{
+				common.AttributePvcNamespace:    "default",
+				common.AttributeHostLocalPolicy: "true",
+				common.AttributeHostLocalTopology: `[{"topology.kubernetes.io/zone":"zone-1",` +
+					`"topology.csi.vmware.com/host":"host-1"}]`,
+			},
+			VolumeCapabilities: []*csi.VolumeCapability{{
+				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+			}},
+			AccessibilityRequirements: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{{Segments: map[string]string{v1.LabelTopologyZone: "zone-1"}}},
+			},
+		}
+	}
+
+	t.Run("HostLocalStorage_only_rejects_parameter", func(t *testing.T) {
+		commonco.ContainerOrchestratorUtility = &fakeCOOverrides{
+			COCommonInterface: originalCO,
+			fssOverrides:      map[string]bool{common.PodVMV2Support: false},
+		}
+		_, faultType, err := ct.controller.createBlockVolume(ctx, req(), true, clusterComputeResourceMoIds)
+		if status.Code(err) != codes.InvalidArgument || faultType != csifault.CSIInvalidArgumentFault {
+			t.Fatalf("expected InvalidArgument, got %s (fault %q): %v", status.Code(err), faultType, err)
+		}
+		if !strings.Contains(err.Error(), common.AttributeHostLocalTopology) {
+			t.Fatalf("expected the rejection to name %q: %v", common.AttributeHostLocalTopology, err)
+		}
+	})
+
+	t.Run("HostLocalStorage_and_PodVMV2_accept_parameter", func(t *testing.T) {
+		commonco.ContainerOrchestratorUtility = &fakeCOOverrides{
+			COCommonInterface: originalCO,
+			fssOverrides:      map[string]bool{common.PodVMV2Support: true},
+		}
+		// Provisioning may still fail further down against the simulator; the parameter itself
+		// must not be rejected.
+		_, _, err := ct.controller.createBlockVolume(ctx, req(), true, clusterComputeResourceMoIds)
+		if err != nil && strings.Contains(err.Error(), "requires a host-local storage policy with both") {
+			t.Fatalf("the parameter must be accepted with HostLocalStorage and PodVM v2 enabled: %v", err)
+		}
+	})
 }

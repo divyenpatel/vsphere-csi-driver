@@ -749,6 +749,15 @@ const (
 	// on the supervisor.
 	HostLocalStorageSupportFSS = "host-local-storage-support"
 
+	// AttributeHostLocalTopology transports paired physical host/zone alternatives.
+	// Accepted only when HostLocalStorage and PodVM v2 are both enabled.
+	AttributeHostLocalTopology = "cns.vmware.com/host-local-topology"
+	// AttributeESXiHostMoID is the actual backing host returned by CNS and mirrored to the PVC.
+	// Written only when HostLocalStorage and PodVM v2 are both enabled.
+	AttributeESXiHostMoID = "cns.vmware.com/esxi-host-moid"
+	// AnnPodVMHostPinned is the durable physical placement constraint on a Supervisor PV.
+	AnnPodVMHostPinned = "cns.vmware.com/podvm-host-pinned"
+
 	// PodVMV2Support indicates Supervisor support for cluster-backed virtual nodes.
 	PodVMV2Support = "supports_podvm_v2"
 
