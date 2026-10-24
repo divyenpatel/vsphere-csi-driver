@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 
 	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
@@ -478,27 +477,6 @@ func zoneSetsEqual(validZones, requestedZones map[string]bool) bool {
 	return true
 }
 
-// zonesToTopologyAnnotation serializes a set of zones back into the JSON array-of-segments
-// shape used by the csi.vsphere.volume-*-topology annotations, e.g.
-// [{"topology.kubernetes.io/zone":"az1"},{"topology.kubernetes.io/zone":"az2"}].
-func zonesToTopologyAnnotation(zones map[string]bool) (string, error) {
-	zoneNames := make([]string, 0, len(zones))
-	for zone := range zones {
-		zoneNames = append(zoneNames, zone)
-	}
-	sort.Strings(zoneNames)
-
-	segments := make([]map[string]string, 0, len(zoneNames))
-	for _, zone := range zoneNames {
-		segments = append(segments, map[string]string{corev1.LabelTopologyZone: zone})
-	}
-	raw, err := json.Marshal(segments)
-	if err != nil {
-		return "", err
-	}
-	return string(raw), nil
-}
-
 func (h *CSISupervisorMutationWebhook) mutateNewPVC(ctx context.Context, req admission.Request) admission.Response {
 	log := logger.GetLogger(ctx)
 
@@ -576,6 +554,20 @@ func (h *CSISupervisorMutationWebhook) mutateNewPVC(ctx context.Context, req adm
 			}
 			// Best-effort for a plain restore: no accessibility info available to propagate.
 		} else {
+			sourceHost := sourcePVC.Annotations[common.AttributeESXiHostMoID]
+			if sourceHost != "" {
+				// Source affinity may be zone-only. Carry the physical host as a
+				// placement constraint, never as the target volume's result pin.
+				sourceTopology, err := common.GuestAccessibleTopology(sourcePVC)
+				if err != nil {
+					return admission.Denied("incomplete source host metadata: " + err.Error())
+				}
+				encoded, err := json.Marshal(sourceTopology)
+				if err != nil {
+					return admission.Denied(err.Error())
+				}
+				sourcePVCAccessibility = string(encoded)
+			}
 			// Case-1: If the PVC has "csi.vsphere.volume-requested-topology" annotation:
 			// - Validate that it overlaps with the source PVC's accessible zones, fail the
 			//   request if not; otherwise narrow the annotation down to just the overlap.
@@ -615,12 +607,12 @@ func (h *CSISupervisorMutationWebhook) mutateNewPVC(ctx context.Context, req adm
 						"request a zone where the source snapshot is accessible, if unset, it will be "+
 						"automatically chosen", sourcePVCAccessibility, newPVCAccessibility)
 					return admission.Denied(errMsg)
-				} else if !zoneSetsEqual(validZones, requestedZones) {
+				} else if !zoneSetsEqual(validZones, requestedZones) || sourceHost != "" {
 					// The requested zones included some the source isn't actually accessible
 					// from (e.g. an unnarrowed candidate list); narrow the annotation down to
 					// just the overlap so downstream CreateVolume pins to a zone that is both
 					// requested and reachable.
-					narrowedTopology, err := zonesToTopologyAnnotation(validZones)
+					narrowedTopology, err := narrowRestoreTopologySegments(newPVCAccessibility, validZones, sourceHost)
 					if err != nil {
 						return admission.Denied("failed to construct narrowed " +
 							common.AnnGuestClusterRequestedTopology + ". err:" + err.Error())
