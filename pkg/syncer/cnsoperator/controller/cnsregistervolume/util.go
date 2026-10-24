@@ -155,77 +155,57 @@ func checkDatastorePolicyCompatibility(ctx context.Context, vc *vsphere.VirtualC
 // fake implementation without needing gomonkey.
 var getHostLocalAccessibleTopologyFn = getHostLocalAccessibleTopology
 
-// getHostLocalAccessibleTopology returns the PV node-affinity topology segments for a
-// host-local volume, pinned to the single ESX host that mounts the datastore:
-// {topology.kubernetes.io/zone, kubernetes.io/hostname}.
-//
-// Derivation (per feature requirements):
-//   - host: Datastore.host[0] — the first host mount of the datastore.
-//   - hostname: the kubernetes.io/hostname value for that host, obtained by reversing
-//     the node-name -> ESX-host-MoID map (on a supervisor the node name equals the
-//     kubernetes.io/hostname label value).
-//   - zone: derived from the cluster the host belongs to (host.parent) via clusterToZone,
-//     which is the inverted AvailabilityZone -> clusters map.
-//
-// Registration cannot proceed if any segment cannot be derived, so this returns an error
-// (not an empty result) when the datastore has no host mount, the host has no matching
-// supervisor node, or the host's cluster has no zone mapping.
+// getHostLocalAccessibleTopology returns zone-only affinity and the physical host
+// identity used to pin a host-local PV. vCenter supplies the exclusive datastore
+// mount and its parent cluster; clusterToZone supplies the namespace's zone.
+// No Supervisor Node name or VirtualNode membership is needed for registration.
+// Missing/ambiguous mounts or a cluster without a zone mapping fail registration.
 func getHostLocalAccessibleTopology(ctx context.Context, vc *vsphere.VirtualCenter,
-	dsInfo *vsphere.DatastoreInfo, clusterToZone map[string]string) ([]map[string]string, error) {
+	dsInfo *vsphere.DatastoreInfo, clusterToZone map[string]string) ([]map[string]string, string, error) {
 	log := logger.GetLogger(ctx)
 
 	// Datastore.host[0]: the ESX host that mounts the host-local datastore.
 	var dsMo mo.Datastore
 	if err := dsInfo.Properties(ctx, dsInfo.Reference(), []string{"host"}, &dsMo); err != nil {
-		return nil, logger.LogNewErrorf(log,
+		return nil, "", logger.LogNewErrorf(log,
 			"failed to retrieve host mounts for datastore %q: %v", dsInfo.Info.Url, err)
 	}
-	if len(dsMo.Host) == 0 {
-		return nil, logger.LogNewErrorf(log,
-			"host-local datastore %q has no host mounts", dsInfo.Info.Url)
+	if len(dsMo.Host) != 1 {
+		return nil, "", logger.LogNewErrorf(log,
+			"host-local datastore %q must have exactly one host mount", dsInfo.Info.Url)
 	}
 	hostRef := dsMo.Host[0].Key
-
-	// hostname: reverse the node-name -> host-MoID map to resolve the host to its node name,
-	// which is the kubernetes.io/hostname value on a supervisor.
-	hostname := commonco.ContainerOrchestratorUtility.GetNodeIDtoNameMap(ctx)[hostRef.Value]
-	if hostname == "" {
-		return nil, logger.LogNewErrorf(log,
-			"failed to resolve kubernetes.io/hostname for ESX host %q backing host-local datastore %q",
-			hostRef.Value, dsInfo.Info.Url)
-	}
 
 	// zone: derive from the cluster the host belongs to (host.parent).
 	hostObj := object.NewHostSystem(vc.Client.Client, hostRef)
 	var hostMo mo.HostSystem
 	if err := hostObj.Properties(ctx, hostRef, []string{"parent"}, &hostMo); err != nil {
-		return nil, logger.LogNewErrorf(log,
+		return nil, "", logger.LogNewErrorf(log,
 			"failed to retrieve parent cluster for ESX host %q: %v", hostRef.Value, err)
 	}
 	if hostMo.Parent == nil {
-		return nil, logger.LogNewErrorf(log,
+		return nil, "", logger.LogNewErrorf(log,
 			"ESX host %q backing host-local datastore %q has no parent cluster", hostRef.Value, dsInfo.Info.Url)
 	}
 	zone, ok := clusterToZone[hostMo.Parent.Value]
 	if !ok || zone == "" {
-		return nil, logger.LogNewErrorf(log,
+		return nil, "", logger.LogNewErrorf(log,
 			"no zone mapping found for cluster %q (host %q); host-local registration requires a "+
 				"zone derived from the host's cluster", hostMo.Parent.Value, hostRef.Value)
 	}
 
 	segment := map[string]string{
 		v1.LabelTopologyZone: zone,
-		v1.LabelHostname:     hostname,
 	}
-	log.Infof("host-local datastore %q resolved to host %q (node %q) in cluster %q, topology: %+v",
-		dsInfo.Info.Url, hostRef.Value, hostname, hostMo.Parent.Value, segment)
-	return []map[string]string{segment}, nil
+	log.Infof("host-local datastore %q resolved to host %q in cluster %q, topology: %+v",
+		dsInfo.Info.Url, hostRef.Value, hostMo.Parent.Value, segment)
+	return []map[string]string{segment}, hostRef.Value, nil
 }
 
 // buildNodeAffinityFromSegments builds a PV VolumeNodeAffinity from topology segments.
 // Each segment contributes one NodeSelectorTerm whose match expressions require every
-// segment key to equal its value (In operator), so both the zone and hostname keys of a
-// host-local segment become required node-selector terms on the PV.
+// segment key to equal its value (In operator). Physical host pinning is carried
+// separately in host-local PV annotations.
 func buildNodeAffinityFromSegments(segments []map[string]string) *v1.VolumeNodeAffinity {
 	if len(segments) == 0 {
 		return nil
