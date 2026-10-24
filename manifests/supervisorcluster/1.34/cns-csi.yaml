@@ -19,6 +19,11 @@ rules:
   - apiGroups: ["virtualnode.vmware.com"]
     resources: ["nodemappings"]
     verbs: ["get", "list", "watch"]
+  # PodVM v2: PodVMPlacement (one per Pod), read for host-local WFFC on a VirtualNode. CSI never writes it.
+  # TODO: The private.iaas.vmware.com group is still Proposed in the platform design.
+  - apiGroups: ["private.iaas.vmware.com"]
+    resources: ["podvmplacements"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes", "pods", "resourcequotas", "namespaces", "services", "secrets"]
     verbs: ["get", "list", "watch"]
