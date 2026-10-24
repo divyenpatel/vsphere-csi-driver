@@ -53,7 +53,8 @@ import (
 // name received in the CreateVolume request for block volumes on WCP CSI driver.
 // Returns true if the parameter name is valid, false otherwise.
 func validateCreateBlockReqParam(paramName, value string) bool {
-	return paramName == common.AttributeStoragePolicyID ||
+	return paramName == common.AttributeHostLocalTopology ||
+		paramName == common.AttributeStoragePolicyID ||
 		paramName == common.AttributeFsType ||
 		paramName == common.AttributeStorageTopologyType ||
 		paramName == common.AttributeStoragePool ||
