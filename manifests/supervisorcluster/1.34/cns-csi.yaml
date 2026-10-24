@@ -15,6 +15,10 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: vsphere-csi-controller-role
 rules:
+  # TODO: Replace with the finalized Pod-to-host placement API group/resource.
+  - apiGroups: ["virtualnode.vmware.com"]
+    resources: ["podvmplacements"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes", "pods", "resourcequotas", "namespaces", "services", "secrets"]
     verbs: ["get", "list", "watch"]
