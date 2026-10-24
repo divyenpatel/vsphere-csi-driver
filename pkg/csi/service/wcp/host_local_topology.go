@@ -162,3 +162,46 @@ func (c *controller) hostLocalInventory(ctx context.Context, vc *cnsvsphere.Virt
 	}
 	return result, nil
 }
+
+// hostLocalAccessibleTopology returns the accessible topology of a provisioned host-local
+// volume and, only with HostLocalStorage + PodVM v2, its backing host MoID.
+//
+//   - HostLocalStorage + PodVM v2 enabled: zone-only topology plus the backing host
+//     (hostLocalVolumeResult). The provisioner publishes the mandatory PV host pin.
+//   - HostLocalStorage only: zone + hostname topology of the host CNS selected
+//     (resolveHostLocalAccessibleTopologySegments) and no backing host, so PV node
+//     affinity pins pods to that host by hostname.
+func hostLocalAccessibleTopology(ctx context.Context, isHostLocalStorageAndPodVMV2Enabled, linkedClone bool,
+	candidates []vimtypes.ManagedObjectReference, inventory map[string]map[string]string,
+	selected *vimtypes.ManagedObjectReference, volumeID string) (map[string]string, string, error) {
+	if isHostLocalStorageAndPodVMV2Enabled {
+		return hostLocalVolumeResult(ctx, linkedClone, candidates, inventory, selected, volumeID)
+	}
+	segments, err := resolveHostLocalAccessibleTopologySegments(ctx, linkedClone, candidates, inventory,
+		selected, volumeID)
+	return segments, "", err
+}
+
+// hostLocalVolumeResult keeps durable physical identity separate from schedulable
+// Supervisor topology. Used only when HostLocalStorage and PodVM v2 are both enabled:
+// it returns zone-only affinity plus the backing host MoID that the provisioner turns
+// into the mandatory PV host pin. With HostLocalStorage alone, callers use
+// resolveHostLocalAccessibleTopologySegments (zone + hostname) instead.
+// The validated source host is used only for linked clones.
+func hostLocalVolumeResult(ctx context.Context, linkedClone bool,
+	candidates []vimtypes.ManagedObjectReference, inventory map[string]map[string]string,
+	selected *vimtypes.ManagedObjectReference, volumeID string) (map[string]string, string, error) {
+	topology, err := resolveHostLocalAccessibleTopologySegments(ctx, linkedClone, candidates, inventory,
+		selected, volumeID)
+	if err != nil {
+		return nil, "", err
+	}
+	host := selected
+	if linkedClone {
+		host = &candidates[0]
+	}
+	if host == nil || host.Type != "HostSystem" || host.Value == "" {
+		return nil, "", fmt.Errorf("invalid backing host for volume %q", volumeID)
+	}
+	return map[string]string{v1.LabelTopologyZone: topology[v1.LabelTopologyZone]}, host.Value, nil
+}

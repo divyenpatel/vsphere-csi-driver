@@ -17,6 +17,9 @@ limitations under the License.
 package wcp
 
 import (
+	"context"
+	"fmt"
+	vimtypes "github.com/vmware/govmomi/vim25/types"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -88,4 +91,63 @@ func TestPhysicalHostCandidates(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, validateCreateBlockReqParam(common.AttributeHostLocalTopology, "[]"))
 	require.False(t, validateCreateFileReqParam(common.AttributeHostLocalTopology, "[]"))
+}
+
+func TestHostLocalVolumeResult(t *testing.T) {
+	inventory := map[string]map[string]string{"host-1": {v1.LabelTopologyZone: "zone-1", v1.LabelHostname: "esx-node"}}
+	host := vimtypes.ManagedObjectReference{Type: "HostSystem", Value: "host-1"}
+	for _, node := range []string{"esx-node", "virtual-node-domain-c1"} {
+		inventory["host-1"][v1.LabelHostname] = node
+		for _, clone := range []bool{false, true} {
+			selected := &host
+			if clone {
+				selected = nil
+			}
+			topology, backingHost, err := hostLocalVolumeResult(context.Background(), clone,
+				[]vimtypes.ManagedObjectReference{host}, inventory, selected, "volume")
+			require.NoError(t, err)
+			require.Equal(t, "host-1", backingHost)
+			require.Equal(t, map[string]string{v1.LabelTopologyZone: "zone-1"}, topology)
+			require.Equal(t, node, inventory["host-1"][v1.LabelHostname])
+		}
+	}
+	_, _, err := hostLocalVolumeResult(context.Background(), false, nil, inventory, nil, "volume")
+	require.Error(t, err)
+	_, _, err = hostLocalVolumeResult(context.Background(), true, nil, inventory, nil, "volume")
+	require.Error(t, err)
+	outsider := vimtypes.ManagedObjectReference{Type: "HostSystem", Value: "host-2"}
+	_, _, err = hostLocalVolumeResult(context.Background(), false, nil, inventory, &outsider, "volume")
+	require.Error(t, err)
+}
+
+// TestHostLocalAccessibleTopologyByFeature checks that HostLocalStorage alone keeps the
+// zone + hostname result with no backing host, and that only HostLocalStorage + PodVM v2
+// returns zone-only topology plus the backing host MoID.
+func TestHostLocalAccessibleTopologyByFeature(t *testing.T) {
+	ctx := context.Background()
+	host := vimtypes.ManagedObjectReference{Type: "HostSystem", Value: "host-1"}
+	inventory := map[string]map[string]string{
+		"host-1": {v1.LabelTopologyZone: "zone-1", v1.LabelHostname: "esx-node-1"},
+	}
+	for _, linkedClone := range []bool{false, true} {
+		selected := &host
+		if linkedClone {
+			selected = nil
+		}
+		t.Run(fmt.Sprintf("HostLocalStorage_only/linkedClone=%t", linkedClone), func(t *testing.T) {
+			topology, backingHost, err := hostLocalAccessibleTopology(ctx, false, linkedClone,
+				[]vimtypes.ManagedObjectReference{host}, inventory, selected, "volume")
+			require.NoError(t, err)
+			require.Empty(t, backingHost)
+			require.Equal(t, map[string]string{v1.LabelTopologyZone: "zone-1", v1.LabelHostname: "esx-node-1"},
+				topology)
+		})
+		t.Run(fmt.Sprintf("HostLocalStorage_and_PodVMV2/linkedClone=%t", linkedClone), func(t *testing.T) {
+			topology, backingHost, err := hostLocalAccessibleTopology(ctx, true, linkedClone,
+				[]vimtypes.ManagedObjectReference{host}, inventory, selected, "volume")
+			require.NoError(t, err)
+			require.Equal(t, "host-1", backingHost)
+			require.Equal(t, map[string]string{v1.LabelTopologyZone: "zone-1"}, topology)
+		})
+	}
 }

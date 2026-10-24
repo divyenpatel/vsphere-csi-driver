@@ -1385,11 +1385,8 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	// Calculate accessible topology for the provisioned volume in case of topology aware environment.
 	if isTKGSHAEnabled {
 		if isHostLocalRequest {
-			// For host-local volumes, build the PV node affinity (zone + hostname) from the host
-			// that CNS selected, reported in the placement result. Publishing both keys pins pods
-			// to the specific host the volume was provisioned on.
-			segments, err := resolveHostLocalAccessibleTopologySegments(ctx, isLinkedCloneRequest,
-				hostMoRefs, hostMoIDToTopology, volumeInfo.Host, volumeInfo.VolumeID.Id)
+			segments, backingHost, err := hostLocalAccessibleTopology(ctx, isHostLocalStorageAndPodVMV2Enabled,
+				isLinkedCloneRequest, hostMoRefs, hostMoIDToTopology, volumeInfo.Host, volumeInfo.VolumeID.Id)
 			if err != nil {
 				// The provisioned volume is unusable without correct host affinity, so clean it up.
 				log.Errorf("Encountered error building host-local topology after creating volume. Cleaning up...")
@@ -1407,6 +1404,9 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to build accessible topology for host-local volume %q. Error: %+v",
 					volumeInfo.VolumeID.Id, err)
+			}
+			if backingHost != "" {
+				resp.Volume.VolumeContext[common.AttributeESXiHostMoID] = backingHost
 			}
 			resp.Volume.AccessibleTopology = []*csi.Topology{{Segments: segments}}
 		} else if hostnameLabelPresent {
