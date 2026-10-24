@@ -54,7 +54,7 @@ func TestCSINodeTopologyControllerForTKGSHA(t *testing.T) {
 		expectedZoneKey         = corev1.LabelTopologyZone
 		expectedZoneValue       = "zone-1"
 		expectedHostKey         = common.GuestClusterTopologyLabelHost
-		expectedHostValue       = "lvn-dvm-10-161-28-187.dvm.lvn.broadcom.net"
+		expectedHostValue       = "host-45"
 		testCSINodeTopology     = &csinodetopologyv1alpha1.CSINodeTopology{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: testCSINodeTopologyName,
@@ -145,12 +145,13 @@ func TestCSINodeTopologyControllerForTKGSHA(t *testing.T) {
 			},
 		}
 		testPVCWithTopologyAnnotation = &corev1.PersistentVolumeClaim{
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      testPVCName,
 				Namespace: testSupervisorNamespace,
 				Annotations: map[string]string{
-					common.AnnVolumeAccessibleTopology: `[{"kubernetes.io/hostname":"` + expectedHostValue +
-						`","topology.kubernetes.io/zone":"` + expectedZoneValue + `"}]`,
+					common.AnnVolumeAccessibleTopology: `[{"topology.kubernetes.io/zone":"` + expectedZoneValue + `"}]`,
+					common.AttributeESXiHostMoID:       expectedHostValue,
 				},
 			},
 		}
@@ -356,6 +357,48 @@ func TestCSINodeTopologyControllerForTKGSHA(t *testing.T) {
 
 			assert.Equal(t, test.expectedCRDStatus, updatedCSINodeTopology.Status.Status)
 			assert.Equal(t, test.expectedTopologyLabels, updatedCSINodeTopology.Status.TopologyLabels)
+		})
+	}
+}
+
+func TestBootVolumeHostMoID(t *testing.T) {
+	for _, scenario := range []string{"legacy local", "virtual local", "shared", "pending", "missing host", "wrong zone"} {
+		t.Run(scenario, func(t *testing.T) {
+			vm := &vmoperatortypes.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+				Spec: vmoperatortypes.VirtualMachineSpec{Volumes: []vmoperatortypes.VirtualMachineVolume{{
+					Name: "boot", Removable: boolPtr(false), VirtualMachineVolumeSource: vmoperatortypes.VirtualMachineVolumeSource{
+						PersistentVolumeClaim: &vmoperatortypes.PersistentVolumeClaimVolumeSource{
+							PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{ClaimName: "boot"},
+						},
+					},
+				}}}, Status: vmoperatortypes.VirtualMachineStatus{Zone: "zone-1"}}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "boot", Namespace: "tenant", Annotations: map[string]string{
+				common.AnnVolumeAccessibleTopology: `[{"topology.kubernetes.io/zone":"zone-1"}]`,
+				common.AttributeESXiHostMoID:       "host-45",
+			}}, Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound}}
+			if scenario == "legacy local" || scenario == "missing host" {
+				pvc.Annotations[common.AnnVolumeAccessibleTopology] = `[{"topology.kubernetes.io/zone":"zone-1","kubernetes.io/hostname":"esx.example.com"}]`
+			}
+			if scenario == "shared" || scenario == "missing host" {
+				delete(pvc.Annotations, common.AttributeESXiHostMoID)
+			}
+			if scenario == "pending" {
+				pvc.Status.Phase = corev1.ClaimPending
+			}
+			if scenario == "wrong zone" {
+				vm.Status.Zone = "zone-2"
+			}
+			host, err := getHostMoIDFromNonRemovableVolume(context.Background(), fake.NewSimpleClientset(pvc), vm, pvc.Namespace)
+			if scenario == "pending" || scenario == "missing host" || scenario == "wrong zone" {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			if scenario == "shared" {
+				assert.Empty(t, host)
+			} else {
+				assert.Equal(t, "host-45", host)
+			}
 		})
 	}
 }
