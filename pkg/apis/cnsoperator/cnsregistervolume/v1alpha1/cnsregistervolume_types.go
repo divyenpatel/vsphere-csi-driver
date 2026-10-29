@@ -74,6 +74,42 @@ type CnsRegisterVolumeSpec struct {
 	StorageClassName string `json:"storageClassName,omitempty"`
 }
 
+// CnsRegisterVolumePhase is the lifecycle phase of a CnsRegisterVolume.
+//
+// Phase is additive, observational state: it reports where in the registration
+// flow the CR currently is. Registered remains the completion signal that
+// callers (e.g. VM Operator, and the VKSRegisterVolume controller's Supervisor
+// watch) key off; Phase must not be used to infer completion.
+type CnsRegisterVolumePhase string
+
+const (
+	// CnsRegisterVolumePhasePending is the initial phase: the CR has been
+	// accepted and its spec is being validated, before any CNS call is made.
+	CnsRegisterVolumePhasePending CnsRegisterVolumePhase = "Pending"
+	// CnsRegisterVolumePhaseCnsRegistering means the CNS CreateVolume call for
+	// this CR is in progress.
+	CnsRegisterVolumePhaseCnsRegistering CnsRegisterVolumePhase = "CnsRegistering"
+	// CnsRegisterVolumePhaseConfiguringK8s means the CNS volume exists and the
+	// Kubernetes objects for it (PV, PVC, topology and volumeMode fixes) are
+	// being created or reconciled.
+	CnsRegisterVolumePhaseConfiguringK8s CnsRegisterVolumePhase = "ConfiguringK8s"
+	// CnsRegisterVolumePhaseWaitingForBind means the PV and PVC exist and the
+	// controller is waiting for the PVC to reach Bound.
+	CnsRegisterVolumePhaseWaitingForBind CnsRegisterVolumePhase = "WaitingForBind"
+	// CnsRegisterVolumePhaseFinalizing means the PVC is Bound and the remaining
+	// bookkeeping (CnsVolumeInfo, storage quota accounting) is being applied.
+	CnsRegisterVolumePhaseFinalizing CnsRegisterVolumePhase = "Finalizing"
+	// CnsRegisterVolumePhaseRegistered is the terminal success phase. It is set
+	// at the same moment as Registered=true.
+	CnsRegisterVolumePhaseRegistered CnsRegisterVolumePhase = "Registered"
+	// CnsRegisterVolumePhaseFailed reports a failure the controller does not
+	// retry on its own, such as a volume that is not accessible to the cluster
+	// or has no storage policy. The CNS volume has been cleaned up. It is set
+	// only on paths that already stopped requeuing before this field existed,
+	// so it reports existing behaviour rather than introducing new behaviour.
+	CnsRegisterVolumePhaseFailed CnsRegisterVolumePhase = "Failed"
+)
+
 // CnsRegisterVolumeStatus defines the observed state of CnsRegisterVolume
 // +k8s:openapi-gen=true
 type CnsRegisterVolumeStatus struct {
@@ -86,6 +122,28 @@ type CnsRegisterVolumeStatus struct {
 	// This field must only be set by the entity completing the import
 	// operation, i.e. the CNS Operator.
 	Error string `json:"error,omitempty"`
+
+	// Phase is the current lifecycle phase of the registration. It is
+	// informational: Registered, not Phase, is the completion signal.
+	// Absent on CRs last written by a controller that predates this field.
+	// +optional
+	Phase CnsRegisterVolumePhase `json:"phase,omitempty"`
+
+	// LastUpdateTime is when this status was last published, i.e. the time of
+	// the most recent write that actually changed the status. A reconcile that
+	// leaves the status unchanged does not move it, so the age of this field is
+	// how long the CR has sat in its current state -- which is the only way to
+	// tell a registration that is progressing from one that has stalled.
+	//
+	// This is a publish time, not an event time: the state it describes was
+	// reached at some point before the write that recorded it.
+	//
+	// Absent on CRs last written by a controller that predates this field.
+	// Consumers must treat an absent value as unknown and fall back to
+	// metadata.creationTimestamp, never as the zero time, which would make every
+	// such CR look arbitrarily old.
+	// +optional
+	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -93,6 +151,11 @@ type CnsRegisterVolumeStatus struct {
 // CnsRegisterVolume is the Schema for the cnsregistervolumes API
 // +k8s:openapi-gen=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="PVCName",type=string,JSONPath=`.spec.pvcName`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Registered",type=boolean,JSONPath=`.status.registered`
+// +kubebuilder:printcolumn:name="LastUpdate",type=date,JSONPath=`.status.lastUpdateTime`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type CnsRegisterVolume struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

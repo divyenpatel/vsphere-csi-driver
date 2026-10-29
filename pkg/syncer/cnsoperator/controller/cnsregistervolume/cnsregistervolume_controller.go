@@ -294,6 +294,11 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
+	// Publish the initial phase before any validation or CNS work, so a CR that
+	// is queued behind others, or failing early, is distinguishable from one the
+	// controller has not looked at yet.
+	setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhasePending)
+
 	// Validate CnsRegisterVolume spec to check for valid entries.
 	err = validateCnsRegisterVolumeSpec(ctx, instance)
 	if err != nil {
@@ -368,6 +373,10 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	}
 	log.Infof("Creating CNS volume: %+v for CnsRegisterVolume request with name: %q on namespace: %q",
 		instance, instance.Name, instance.Namespace)
+	// CreateVolume blocks until the CNS task completes, which is the single
+	// longest step of a registration. Publish the phase first so the wait is
+	// visible on the CR while it is happening, not only after it returns.
+	setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseCnsRegistering)
 	volInfo, _, err := r.volumeManager.CreateVolume(ctx, createSpec, nil)
 	if err != nil {
 		msg := fmt.Sprintf("failed to create CNS volume. Error: %v", err)
@@ -395,6 +404,8 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 
 	volumeID = volInfo.VolumeID.Id
 	log.Infof("Created CNS volume with volumeID: %s", volumeID)
+	// The CNS volume exists from here on; the remaining work is Kubernetes-side.
+	setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseConfiguringK8s)
 	r.clearStaleDeleteOperationRecord(ctx, volumeID)
 
 	pvName = staticPvNamePrefix + volumeID
@@ -475,6 +486,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
 			// permanent failure and not requeue.
+			setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFailed)
 			return reconcile.Result{}, nil
 		}
 
@@ -497,6 +509,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
 			// permanent failure and not requeue.
+			setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFailed)
 			return reconcile.Result{}, nil
 		}
 
@@ -512,6 +525,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
 			// permanent failure and not requeue.
+			setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFailed)
 			return reconcile.Result{}, nil
 		}
 	} else if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
@@ -548,6 +562,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 						return reconcile.Result{RequeueAfter: timeout}, nil
 					}
 					// permanent failure and not requeue.
+					setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFailed)
 					return reconcile.Result{}, nil
 				}
 			} else {
@@ -562,6 +577,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 						return reconcile.Result{RequeueAfter: timeout}, nil
 					}
 					// permanent failure and not requeue.
+					setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFailed)
 					return reconcile.Result{}, nil
 				}
 			}
@@ -577,6 +593,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
 		// permanent failure and not requeue.
+		setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFailed)
 		return reconcile.Result{}, nil
 	}
 	// Verify if storage policy is empty.
@@ -944,9 +961,11 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		}
 	}
 	// Watch for PVC to be bound.
+	setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseWaitingForBind)
 	isBound, err := isPVCBound(ctx, k8sclient, pvc, time.Duration(1*time.Minute))
 	if isBound {
 		log.Infof("PVC: %s is bound", instance.Spec.PvcName)
+		setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFinalizing)
 		if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
 			// Create CNSVolumeInfo CR for static pv (pvCapacity set earlier from PVC or backend)
 			err = r.volumeInfoService.CreateVolumeInfoWithPolicyInfo(ctx, volumeID, instance.Namespace,
@@ -1521,6 +1540,41 @@ func setInstanceError(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	recordEvent(ctx, r, instance, v1.EventTypeWarning, errMsg)
 }
 
+// setInstancePhase publishes a new lifecycle phase on the CnsRegisterVolume
+// instance.
+//
+// It is purely observational: it leaves Registered and Error untouched, and a
+// failure to publish is logged rather than returned, so that reporting progress
+// can never fail a registration that is otherwise succeeding. Callers therefore
+// do not need to handle an error from it.
+//
+// Publishing status does not re-trigger this controller: it filters events with
+// predicate.GenerationChangedPredicate, and a status-subresource write does not
+// bump metadata.generation.
+func setInstancePhase(ctx context.Context, r *ReconcileCnsRegisterVolume,
+	instance *cnsregistervolumev1alpha1.CnsRegisterVolume,
+	phase cnsregistervolumev1alpha1.CnsRegisterVolumePhase) {
+	log := logger.GetLogger(ctx)
+	if instance.Status.Phase == phase {
+		// Already in this phase, so there is nothing to publish. Returning here
+		// also keeps LastUpdateTime from moving, which is what lets the age of
+		// that field measure how long the CR has been in its current state.
+		return
+	}
+	prevPhase := instance.Status.Phase
+	prevLastUpdateTime := instance.Status.LastUpdateTime
+	origInstance := instance.DeepCopy()
+	instance.Status.Phase = phase
+	if err := patchCnsRegisterVolumeStatus(ctx, r.client, origInstance, instance); err != nil {
+		// Roll the in-memory status back so it keeps matching the server; the
+		// next transition will try to publish again.
+		instance.Status.Phase = prevPhase
+		instance.Status.LastUpdateTime = prevLastUpdateTime
+		log.Errorf("Failed to publish phase %q on CnsRegisterVolume instance: %q on namespace: %q. err: %v",
+			phase, instance.Name, instance.Namespace, err)
+	}
+}
+
 // setInstanceSuccess sets instance to success and records an event on the
 // CnsRegisterVolume instance.
 func setInstanceSuccess(ctx context.Context, r *ReconcileCnsRegisterVolume,
@@ -1547,6 +1601,9 @@ func setInstanceSuccess(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	origInstance := instance.DeepCopy()
 	instance.Status.Registered = true
 	instance.Status.Error = ""
+	// Registered=true and Phase=Registered are published in the same write, so
+	// no observer can ever see one without the other.
+	instance.Status.Phase = cnsregistervolumev1alpha1.CnsRegisterVolumePhaseRegistered
 	err = patchCnsRegisterVolumeStatus(ctx, r.client, origInstance, instance)
 	if err != nil {
 		log.Errorf("patchCnsRegisterVolumeStatus failed. err: %v", err)
@@ -1637,6 +1694,27 @@ func patchCnsRegisterVolumeStatus(ctx context.Context, cnsOperatorClient client.
 	// 2. we're clearing an error (oldObj has error, newObj doesn't)
 	if newObj.Status.Error != "" || (oldObj.Status.Error != "" && newObj.Status.Error == "") {
 		statusMap["error"] = newObj.Status.Error
+	}
+
+	// Phase follows the same rule as error: include it when it has a value, or
+	// when it is being cleared. Omitting it leaves any stored value untouched,
+	// which is what keeps a status write that is only about registered/error
+	// from wiping a phase published by an earlier write.
+	if newObj.Status.Phase != "" || oldObj.Status.Phase != "" {
+		statusMap["phase"] = newObj.Status.Phase
+	}
+
+	// LastUpdateTime is the time the status was last *published*, so it moves
+	// only when the published content actually changes. A write that re-states
+	// the same registered/error/phase leaves it alone; that is what makes the
+	// age of this field a measure of how long the CR has been in its current
+	// state rather than a measure of how recently it was reconciled.
+	if newObj.Status.Registered != oldObj.Status.Registered ||
+		newObj.Status.Error != oldObj.Status.Error ||
+		newObj.Status.Phase != oldObj.Status.Phase {
+		now := metav1.Now()
+		newObj.Status.LastUpdateTime = &now
+		statusMap["lastUpdateTime"] = &now
 	}
 
 	statusPatch := map[string]interface{}{

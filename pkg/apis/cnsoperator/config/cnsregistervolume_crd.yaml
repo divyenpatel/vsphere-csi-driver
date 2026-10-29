@@ -16,7 +16,23 @@ spec:
     singular: cnsregistervolume
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.pvcName
+      name: PVCName
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.registered
+      name: Registered
+      type: boolean
+    - jsonPath: .status.lastUpdateTime
+      name: LastUpdate
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: CnsRegisterVolume is the Schema for the cnsregistervolumes API
@@ -99,6 +115,24 @@ spec:
                 description: The last error encountered during import operation, if
                   any. This field must only be set by the entity completing the import
                   operation, i.e. the CNS Operator.
+                type: string
+              lastUpdateTime:
+                description: LastUpdateTime is when this status was last published,
+                  i.e. the time of the most recent write that actually changed the
+                  status. A reconcile that leaves the status unchanged does not move
+                  it, so the age of this field is how long the CR has sat in its
+                  current state. This is a publish time, not an event time. Absent
+                  on CRs last written by a controller that predates this field;
+                  consumers must treat an absent value as unknown and fall back to
+                  metadata.creationTimestamp, never as the zero time.
+                format: date-time
+                type: string
+              phase:
+                description: 'Phase is the current lifecycle phase of the registration.
+                  It is informational: registered, not phase, is the completion signal.
+                  One of: Pending, CnsRegistering, ConfiguringK8s, WaitingForBind,
+                  Finalizing, Registered, Failed. Absent on CRs last written by a
+                  controller that predates this field.'
                 type: string
               registered:
                 description: Indicates the volume is successfully registered. This

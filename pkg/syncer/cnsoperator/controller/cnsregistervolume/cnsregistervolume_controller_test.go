@@ -5043,7 +5043,10 @@ func newHostLocalReconcileFixture(patches *gomonkey.Patches, storageLocality str
 			PvcName: "test-pvc", VolumeID: "dummy-volume-id", AccessMode: "ReadWriteOnce",
 		},
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crv).Build()
+	// WithStatusSubresource mirrors the real CRD, which declares subresources.status;
+	// without it the controller's Status().Patch calls cannot be exercised here.
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(crv).WithStatusSubresource(crv).Build()
 
 	commonco.ContainerOrchestratorUtility = &mockCOCommon{}
 	fssEnabledOverride = func(_ string) bool { return true }
