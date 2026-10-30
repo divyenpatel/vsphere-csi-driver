@@ -41,9 +41,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/types"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/util"
 
@@ -69,7 +72,13 @@ import (
 const (
 	workerThreadsEnvVar     = "WORKER_THREADS_REGISTER_VOLUME"
 	defaultMaxWorkerThreads = 40
-	staticPvNamePrefix      = "static-pv-"
+	// maxInFlightCnsTasksEnvVar caps concurrent CNS CreateVolume tasks. Before
+	// the task wait was moved off the reconciler worker, the worker pool itself
+	// capped this at defaultMaxWorkerThreads; this replaces that ceiling
+	// explicitly so vCenter sees no more concurrency than it does today.
+	maxInFlightCnsTasksEnvVar  = "MAX_INFLIGHT_CNS_TASKS_REGISTER_VOLUME"
+	defaultMaxInFlightCnsTasks = 40
+	staticPvNamePrefix         = "static-pv-"
 	// Labels added to PVs created by CnsRegisterVolume for identification and direct lookup
 	labelCnsRegisterVolumeCreatedBy      = "cns.vmware.com/created-by"
 	labelCnsRegisterVolumeCreatedByValue = "cnsregistervolume"
@@ -188,9 +197,16 @@ func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationIn
 		log.Errorf("Failed to create k8s client. Err: %v", err)
 		return nil, err
 	}
+	maxInFlight := util.GetMaxWorkerThreads(ctx, maxInFlightCnsTasksEnvVar, defaultMaxInFlightCnsTasks)
+	// Buffered so the tracker's goroutines never block delivering a wake-up.
+	taskEvents := make(chan event.GenericEvent, maxInFlight*2)
 	return &ReconcileCnsRegisterVolume{client: mgr.GetClient(), scheme: mgr.GetScheme(),
 		configInfo: configInfo, volumeManager: volumeManager, recorder: recorder,
-		volumeInfoService: volumeInfoService, k8sclient: k8sclient}, nil
+		volumeInfoService: volumeInfoService, k8sclient: k8sclient,
+		// The listview and vCenter are bound on first use, once a reconcile has
+		// a live VC connection.
+		taskTracker: newCnsTaskTracker(nil, nil, taskEvents, maxInFlight),
+		taskEvents:  taskEvents}, nil
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler.
@@ -200,11 +216,20 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	maxWorkerThreads := util.GetMaxWorkerThreads(ctx,
 		workerThreadsEnvVar, defaultMaxWorkerThreads)
 	// Create a new controller.
-	err := ctrl.NewControllerManagedBy(mgr).Named("cnsregistervolume-controller").
+	builder := ctrl.NewControllerManagedBy(mgr).Named("cnsregistervolume-controller").
 		For(&cnsregistervolumev1alpha1.CnsRegisterVolume{}).
 		WithEventFilter(predicate.GenerationChangedPredicate{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: maxWorkerThreads}).
-		Complete(r)
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxWorkerThreads})
+
+	// Wake a CR as soon as its CNS task completes, instead of waiting for the
+	// safety requeue. GenerationChangedPredicate overrides only Update, so
+	// Generic events pass through this filter untouched.
+	if reconciler, ok := r.(*ReconcileCnsRegisterVolume); ok && reconciler.taskEvents != nil {
+		builder = builder.WatchesRawSource(
+			source.Channel(reconciler.taskEvents, &handler.EnqueueRequestForObject{}))
+	}
+
+	err := builder.Complete(r)
 	if err != nil {
 		log.Errorf("Failed to build application controller. Err: %v", err)
 		return err
@@ -229,6 +254,17 @@ type ReconcileCnsRegisterVolume struct {
 	recorder          record.EventRecorder
 	volumeInfoService cnsvolumeinfo.VolumeInfoService
 	k8sclient         clientset.Interface
+	// taskTracker watches in-flight CNS CreateVolume tasks so that no
+	// reconciler worker has to block on one.
+	taskTracker *cnsTaskTracker
+	// taskEvents carries wake-ups from the tracker back into the controller's
+	// work queue; it is registered as a source.Channel watch in add().
+	taskEvents chan event.GenericEvent
+}
+
+// instanceKey is the work-queue identity of a CnsRegisterVolume.
+func instanceKey(instance *cnsregistervolumev1alpha1.CnsRegisterVolume) apitypes.NamespacedName {
+	return apitypes.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}
 }
 
 // Reconcile reads that state of the cluster for a CnsRegisterVolume object
@@ -373,11 +409,13 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	}
 	log.Infof("Creating CNS volume: %+v for CnsRegisterVolume request with name: %q on namespace: %q",
 		instance, instance.Name, instance.Namespace)
-	// CreateVolume blocks until the CNS task completes, which is the single
-	// longest step of a registration. Publish the phase first so the wait is
-	// visible on the CR while it is happening, not only after it returns.
-	setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseCnsRegistering)
-	volInfo, _, err := r.volumeManager.CreateVolume(ctx, createSpec, nil)
+	// Submit the CNS task and return, or pick up the result of a task submitted
+	// by an earlier pass. Either way this does not block on CNS, so the worker
+	// is free to start another CnsRegisterVolume while this one's task runs.
+	volInfo, taskResult, err := r.submitOrPollCreateVolume(ctx, instance, vc, createSpec, timeout)
+	if taskResult != nil {
+		return *taskResult, nil
+	}
 	if err != nil {
 		msg := fmt.Sprintf("failed to create CNS volume. Error: %v", err)
 		log.Errorf(msg)
@@ -960,10 +998,20 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			IsPVCCreatedByCNSRegisterVolumeReconciler = true
 		}
 	}
-	// Watch for PVC to be bound.
+	// Check whether the PVC is bound, without blocking on it. The previous
+	// implementation opened a per-CR watch and held this worker for up to 60s;
+	// now an unbound PVC simply requeues and the worker moves on.
 	setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseWaitingForBind)
-	isBound, err := isPVCBound(ctx, k8sclient, pvc, time.Duration(1*time.Minute))
-	if isBound {
+	isBound, err := isPVCBoundNow(ctx, k8sclient, pvc)
+	if err != nil {
+		log.Errorf("failed to check bind state of PVC %s: %v", instance.Spec.PvcName, err)
+		return reconcile.Result{RequeueAfter: timeout}, nil
+	}
+	if !isBound {
+		log.Infof("PVC %s is not bound yet; will re-check", instance.Spec.PvcName)
+		return reconcile.Result{RequeueAfter: pvcBindPollInterval}, nil
+	}
+	{
 		log.Infof("PVC: %s is bound", instance.Spec.PvcName)
 		setInstancePhase(ctx, r, instance, cnsregistervolumev1alpha1.CnsRegisterVolumePhaseFinalizing)
 		if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
@@ -1076,10 +1124,6 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 					pvCapacity.String(), finalStoragePolicyUsageCR.Name, finalStoragePolicyUsageCR.Namespace)
 			}
 		}
-	} else {
-		log.Errorf("PVC: %s is not bound. Error: %+v", instance.Spec.PvcName, err)
-		setInstanceError(ctx, r, instance, fmt.Sprintf("PVC: %s is not bound", instance.Spec.PvcName))
-		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
 	if isSharedDiskEnabled && !IsPVCCreatedByCNSRegisterVolumeReconciler {
@@ -1575,6 +1619,20 @@ func setInstancePhase(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	}
 }
 
+// setInstanceCnsTaskID persists the in-flight CNS task reference, or clears it
+// by passing an empty string. Returning the error matters here, unlike for the
+// phase: if the task ID cannot be stored, the submitted task has no durable
+// reference and the caller must decide what to do about it.
+func setInstanceCnsTaskID(ctx context.Context, r *ReconcileCnsRegisterVolume,
+	instance *cnsregistervolumev1alpha1.CnsRegisterVolume, taskID string) error {
+	if instance.Status.CnsTaskID == taskID {
+		return nil
+	}
+	origInstance := instance.DeepCopy()
+	instance.Status.CnsTaskID = taskID
+	return patchCnsRegisterVolumeStatus(ctx, r.client, origInstance, instance)
+}
+
 // setInstanceSuccess sets instance to success and records an event on the
 // CnsRegisterVolume instance.
 func setInstanceSuccess(ctx context.Context, r *ReconcileCnsRegisterVolume,
@@ -1704,6 +1762,13 @@ func patchCnsRegisterVolumeStatus(ctx context.Context, cnsOperatorClient client.
 		statusMap["phase"] = newObj.Status.Phase
 	}
 
+	// cnsTaskID follows the same include-or-clear rule. Clearing it matters:
+	// a stale task ID left behind would make the next reconcile poll a task
+	// that is already finished with.
+	if newObj.Status.CnsTaskID != "" || oldObj.Status.CnsTaskID != "" {
+		statusMap["cnsTaskID"] = newObj.Status.CnsTaskID
+	}
+
 	// LastUpdateTime is the time the status was last *published*, so it moves
 	// only when the published content actually changes. A write that re-states
 	// the same registered/error/phase leaves it alone; that is what makes the
@@ -1711,7 +1776,8 @@ func patchCnsRegisterVolumeStatus(ctx context.Context, cnsOperatorClient client.
 	// state rather than a measure of how recently it was reconciled.
 	if newObj.Status.Registered != oldObj.Status.Registered ||
 		newObj.Status.Error != oldObj.Status.Error ||
-		newObj.Status.Phase != oldObj.Status.Phase {
+		newObj.Status.Phase != oldObj.Status.Phase ||
+		newObj.Status.CnsTaskID != oldObj.Status.CnsTaskID {
 		now := metav1.Now()
 		newObj.Status.LastUpdateTime = &now
 		statusMap["lastUpdateTime"] = &now
@@ -1778,6 +1844,17 @@ func (r *ReconcileCnsRegisterVolume) reconcileDelete(ctx context.Context,
 		delete(backOffDuration, request.NamespacedName)
 		backOffDurationMapMutex.Unlock()
 		return reconcile.Result{}, nil
+	}
+
+	// If a CNS task is still in flight, the finalizer must stay: the task may
+	// be about to create a volume, and dropping the finalizer now would delete
+	// the CR and leave that volume behind with nothing referencing it.
+	// Starting a second CNS operation on the same disk is also not an option,
+	// so the only correct move is to wait for the task to settle.
+	if instance.Status.CnsTaskID != "" {
+		if res := r.resolveInFlightTaskForDelete(ctx, instance, request, timeout); res != nil {
+			return *res, nil
+		}
 	}
 
 	// If not registered, we need to clean up any partially created resources.

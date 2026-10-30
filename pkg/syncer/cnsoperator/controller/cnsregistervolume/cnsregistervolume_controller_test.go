@@ -536,6 +536,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(&instance).
+			WithStatusSubresource(&instance, crv).
 			Build()
 		_ = fakeClient.Create(ctx, crv)
 
@@ -644,7 +645,8 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 			},
 		}
 
-		result, err := r.Reconcile(ctx, req)
+		defer wireAsyncCnsTaskSuccess(r)()
+		result, err := reconcileUntilSettled(ctx, r, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(reconcile.Result{RequeueAfter: 0}))
 	})
@@ -748,6 +750,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(diskURLCR).
+			WithStatusSubresource(diskURLCR).
 			Build()
 
 		var unregCalled bool
@@ -818,7 +821,8 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 				Namespace: "test-ns",
 			},
 		}
-		result, err := diskURLReconciler.Reconcile(ctx, req)
+		defer wireAsyncCnsTaskSuccess(diskURLReconciler)()
+		result, err := reconcileUntilSettled(ctx, diskURLReconciler, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result).To(Equal(reconcile.Result{RequeueAfter: 0}))
 		Expect(unregCalled).To(BeTrue(), "UnregisterVolume must be called for DiskURLPath accessibility failure")
@@ -849,6 +853,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(registerCR, staleRecord, otherRecord).
+			WithStatusSubresource(registerCR).
 			Build()
 		reconciler := &ReconcileCnsRegisterVolume{
 			client:     fakeClient,
@@ -905,7 +910,8 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 			instance *cnsregistervolumev1alpha1.CnsRegisterVolume, msg string) {
 		})
 
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{
+		defer wireAsyncCnsTaskSuccess(reconciler)()
+		_, err := reconcileUntilSettled(ctx, reconciler, reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: registerCR.Name, Namespace: registerCR.Namespace},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -949,6 +955,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 		fakeClient := fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithObjects(diskURLCR, spq).
+			WithStatusSubresource(diskURLCR).
 			Build()
 
 		var unregCalled bool
@@ -1045,7 +1052,8 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 		req := reconcile.Request{
 			NamespacedName: types.NamespacedName{Name: "disk-url-topo-test", Namespace: "test-ns"},
 		}
-		_, err := diskURLReconciler.Reconcile(ctx, req)
+		defer wireAsyncCnsTaskSuccess(diskURLReconciler)()
+		_, err := reconcileUntilSettled(ctx, diskURLReconciler, req)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(unregCalled).To(BeTrue(),
 			"UnregisterVolume must be called for DiskURLPath when topology validation fails")
@@ -2392,7 +2400,8 @@ func TestReconcileRejectsUnassignedStorageClassPolicy(t *testing.T) {
 			StorageClassName: "unauthorized-sc",
 		},
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crv).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(crv).WithStatusSubresource(crv).Build()
 
 	sc := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "unauthorized-sc"},
@@ -2476,7 +2485,8 @@ func TestReconcileReusesSpecifiedStorageClassNameWithoutLateDiscovery(t *testing
 			StorageClassName: scName,
 		},
 	}
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(crv).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(crv).WithStatusSubresource(crv).Build()
 
 	sc := &storagev1.StorageClass{
 		ObjectMeta: metav1.ObjectMeta{Name: scName},
@@ -2568,7 +2578,8 @@ func TestReconcileReusesSpecifiedStorageClassNameWithoutLateDiscovery(t *testing
 	})
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}}
-	_, err := r.Reconcile(context.Background(), req)
+	defer wireAsyncCnsTaskSuccess(r)()
+	_, err := reconcileUntilSettled(context.Background(), r, req)
 
 	assert.NoError(t, err)
 	assert.False(t, lateDiscoveryCalled,
@@ -5122,6 +5133,7 @@ func TestReconcileHostLocalPBMIncompatible(t *testing.T) {
 	defer patches.Reset()
 
 	r, setErrCalled, cleanupCalled := newHostLocalReconcileFixture(patches, "HostLocalStorage")
+	defer wireAsyncCnsTaskSuccess(r)()
 	defer func() { fssEnabledOverride = nil }()
 
 	checkDatastorePolicyCompatibilityFn = func(_ context.Context, _ *cnsvsphere.VirtualCenter,
@@ -5131,7 +5143,7 @@ func TestReconcileHostLocalPBMIncompatible(t *testing.T) {
 	defer func() { checkDatastorePolicyCompatibilityFn = checkDatastorePolicyCompatibility }()
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}}
-	result, err := r.Reconcile(ctx, req)
+	result, err := reconcileUntilSettled(ctx, r, req)
 
 	assert.NoError(t, err)
 	assert.Equal(t, reconcile.Result{}, result)
@@ -5151,6 +5163,7 @@ func TestReconcileHostLocalDetectedFromNewSchemaPolicy(t *testing.T) {
 	defer patches.Reset()
 
 	r, _, cleanupCalled := newHostLocalReconcileFixture(patches, "HostLocalStorage")
+	defer wireAsyncCnsTaskSuccess(r)()
 	defer func() { fssEnabledOverride = nil }()
 
 	compatChecked := false
@@ -5173,7 +5186,7 @@ func TestReconcileHostLocalDetectedFromNewSchemaPolicy(t *testing.T) {
 	defer func() { getHostLocalAccessibleTopologyFn = getHostLocalAccessibleTopology }()
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}}
-	_, err := r.Reconcile(ctx, req)
+	_, err := reconcileUntilSettled(ctx, r, req)
 
 	assert.NoError(t, err)
 	assert.True(t, compatChecked,
@@ -5196,6 +5209,7 @@ func TestReconcileHostLocalNotDetectedForStorageLocalityNone(t *testing.T) {
 	defer patches.Reset()
 
 	r, _, _ := newHostLocalReconcileFixture(patches, "None")
+	defer wireAsyncCnsTaskSuccess(r)()
 	defer func() { fssEnabledOverride = nil }()
 
 	// Pin the non-host-local route to the shared-datastore accessibility gate and observe it.
@@ -5227,7 +5241,7 @@ func TestReconcileHostLocalNotDetectedForStorageLocalityNone(t *testing.T) {
 	defer func() { getHostLocalAccessibleTopologyFn = getHostLocalAccessibleTopology }()
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}}
-	_, err := r.Reconcile(ctx, req)
+	_, err := reconcileUntilSettled(ctx, r, req)
 
 	assert.NoError(t, err)
 	assert.False(t, compatChecked, "StorageLocality None must not enter the host-local branch")
@@ -5244,6 +5258,7 @@ func TestReconcileHostLocalTopologyError(t *testing.T) {
 	defer patches.Reset()
 
 	r, setErrCalled, cleanupCalled := newHostLocalReconcileFixture(patches, "HostLocalStorage")
+	defer wireAsyncCnsTaskSuccess(r)()
 	defer func() { fssEnabledOverride = nil }()
 
 	checkDatastorePolicyCompatibilityFn = func(_ context.Context, _ *cnsvsphere.VirtualCenter,
@@ -5259,7 +5274,7 @@ func TestReconcileHostLocalTopologyError(t *testing.T) {
 	defer func() { getHostLocalAccessibleTopologyFn = getHostLocalAccessibleTopology }()
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}}
-	result, err := r.Reconcile(ctx, req)
+	result, err := reconcileUntilSettled(ctx, r, req)
 
 	assert.NoError(t, err)
 	assert.Equal(t, reconcile.Result{}, result)

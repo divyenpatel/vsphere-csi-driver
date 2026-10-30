@@ -479,6 +479,7 @@ func TestReconcilePublishesFailedPhaseOnPermanentFailure(t *testing.T) {
 	defer patches.Reset()
 
 	r, _, cleanupCalled := newHostLocalReconcileFixture(patches, "HostLocalStorage")
+	defer wireAsyncCnsTaskSuccess(r)()
 	defer func() { fssEnabledOverride = nil }()
 
 	checkDatastorePolicyCompatibilityFn = func(_ context.Context, _ *cnsvsphere.VirtualCenter,
@@ -487,7 +488,7 @@ func TestReconcilePublishesFailedPhaseOnPermanentFailure(t *testing.T) {
 	}
 	defer func() { checkDatastorePolicyCompatibilityFn = checkDatastorePolicyCompatibility }()
 
-	result, err := r.Reconcile(ctx, reconcile.Request{
+	result, err := reconcileUntilSettled(ctx, r, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: "test-volume", Namespace: "test-ns"}})
 
 	assert.NoError(t, err)

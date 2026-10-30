@@ -111,6 +111,14 @@ spec:
           status:
             description: CnsRegisterVolumeStatus defines the observed state of CnsRegisterVolume
             properties:
+              cnsTaskID:
+                description: CnsTaskID is the vCenter managed object ID of the
+                  in-flight CNS CreateVolume task for this CR, while one is
+                  running. It is set immediately after a successful submit and
+                  cleared once the task reaches a terminal state, and lets the
+                  controller resume monitoring a task across reconciles and
+                  across a syncer restart without holding a worker.
+                type: string
               error:
                 description: The last error encountered during import operation, if
                   any. This field must only be set by the entity completing the import

@@ -58,6 +58,11 @@ func TestCRDDeclaresPhaseAndLastUpdateTime(t *testing.T) {
 	require.True(t, ok, "status.phase must be declared in the CRD or the API server prunes it")
 	assert.Equal(t, "string", phase.Type)
 
+	cnsTaskID, ok := status.Properties["cnsTaskID"]
+	require.True(t, ok, "status.cnsTaskID must be declared or the API server prunes it, which would "+
+		"make every reconcile resubmit a CNS task instead of resuming the one already running")
+	assert.Equal(t, "string", cnsTaskID.Type)
+
 	lastUpdateTime, ok := status.Properties["lastUpdateTime"]
 	require.True(t, ok, "status.lastUpdateTime must be declared in the CRD or the API server prunes it")
 	assert.Equal(t, "string", lastUpdateTime.Type)
@@ -86,6 +91,7 @@ func TestCRDStatusRemainsBackwardsCompatible(t *testing.T) {
 	// stay valid.
 	assert.NotContains(t, status.Required, "phase")
 	assert.NotContains(t, status.Required, "lastUpdateTime")
+	assert.NotContains(t, status.Required, "cnsTaskID")
 }
 
 // TestCRDSpecIsUnchanged verifies no spec field was disturbed; the spec is the half

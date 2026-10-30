@@ -129,6 +129,20 @@ type CnsRegisterVolumeStatus struct {
 	// +optional
 	Phase CnsRegisterVolumePhase `json:"phase,omitempty"`
 
+	// CnsTaskID is the vCenter managed object ID of the in-flight CNS
+	// CreateVolume task for this CR, while one is running.
+	//
+	// It exists because the controller submits the task and returns rather than
+	// holding a worker until CNS responds, so the task reference has to survive
+	// across reconciles. There is no other durable copy: this controller writes
+	// no CnsVolumeOperationRequest, and the volume manager skips its in-memory
+	// task map for static provisioning specs.
+	//
+	// Set immediately after a successful submit and cleared once the task has
+	// reached a terminal state. A cleared or failed task ID is never reused.
+	// +optional
+	CnsTaskID string `json:"cnsTaskID,omitempty"`
+
 	// LastUpdateTime is when this status was last published, i.e. the time of
 	// the most recent write that actually changed the status. A reconcile that
 	// leaves the status unchanged does not move it, so the age of this field is
