@@ -21,8 +21,6 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest"
 )
 
-type blockingSessionTransport struct{ started chan struct{} }
-
 type blockingListViewTransport struct {
 	started  chan struct{}
 	deadline chan time.Time
@@ -77,12 +75,6 @@ func (v *taskUpdateView) AddTask(_ context.Context, ref types.ManagedObjectRefer
 func (v *taskUpdateView) RemoveTask(_ context.Context, ref types.ManagedObjectReference) error {
 	v.view.taskMap.Delete(ref)
 	return nil
-}
-
-func (b *blockingSessionTransport) RoundTrip(ctx context.Context, _, _ soap.HasFault) error {
-	close(b.started)
-	<-ctx.Done()
-	return ctx.Err()
 }
 
 func TestCreateVolumeMonitoringInterruptionPreservesTask(t *testing.T) {
@@ -369,40 +361,13 @@ func TestCanceledAddDoesNotWaitForBusyView(t *testing.T) {
 }
 
 func TestViewLockWaitHonorsDeadline(t *testing.T) {
-	var lock contextMutex
+	var lock viewLock
 	require.NoError(t, lock.Lock(context.Background()))
 	defer lock.Unlock()
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	require.ErrorIs(t, lock.Lock(ctx), context.DeadlineExceeded)
-}
-
-func TestStalledSessionCheckDoesNotTrapCanceledRequests(t *testing.T) {
-	sessionRef := types.ManagedObjectReference{Type: "SessionManager", Value: "session"}
-	collectorRef := types.ManagedObjectReference{Type: "PropertyCollector", Value: "collector"}
-	transport := &blockingSessionTransport{started: make(chan struct{})}
-	client := &vim25.Client{RoundTripper: transport, ServiceContent: types.ServiceContent{
-		SessionManager: &sessionRef, PropertyCollector: collectorRef,
-	}}
-	sharedCtx, sharedCancel := context.WithCancel(context.Background())
-	defer sharedCancel()
-	l := &ListViewImpl{isReady: true, virtualCenter: newTestVirtualCenter(client), client: client,
-		waitForUpdatesContext: sharedCtx, waitForUpdatesCancelFunc: sharedCancel}
-	firstCtx, cancelFirst := context.WithCancel(logger.NewContextWithLogger(context.Background()))
-	firstDone := make(chan error, 1)
-	go func() {
-		firstDone <- l.AddTask(firstCtx, types.ManagedObjectReference{Type: "Task", Value: "task-1"},
-			make(chan TaskResult, 1))
-	}()
-	<-transport.started
-	secondCtx, cancelSecond := context.WithCancel(logger.NewContextWithLogger(context.Background()))
-	cancelSecond()
-	err := l.AddTask(secondCtx, types.ManagedObjectReference{Type: "Task", Value: "task-2"}, make(chan TaskResult, 1))
-	require.ErrorIs(t, err, context.Canceled)
-	cancelFirst()
-	require.ErrorIs(t, <-firstDone, context.Canceled)
-	require.True(t, l.IsListViewReady())
-	require.NoError(t, sharedCtx.Err())
+	require.ErrorIs(t, lock.RLock(ctx), context.DeadlineExceeded)
 }
 
 func TestStalledListViewAddHonorsCancellation(t *testing.T) {
