@@ -43,9 +43,13 @@ const (
 	// long enough that it does not become a poll. A push the listview itself
 	// never delivers is bounded by cnsTaskWatchTimeout instead.
 	cnsTaskSafetyRequeue = 10 * time.Second
-	// cnsSlotRetryInterval is how long a CR waits before trying again for an
-	// in-flight CNS slot.
-	cnsSlotRetryInterval = 5 * time.Second
+	// cnsSlotRetryInterval is the safety requeue of a CR waiting for an
+	// in-flight CNS slot. The CR is woken as soon as a slot is free for it (see
+	// cnsTaskTracker.wakeWaitersLocked), so this only bounds a lost wake-up. It
+	// used to be a 5s poll: with hundreds of CRs waiting, those retries alone
+	// filled the reconcile queue that slot holders need to finish and free
+	// their slots.
+	cnsSlotRetryInterval = 30 * time.Second
 	// pvcBindPollInterval is how often a CR in WaitingForBind re-checks its
 	// PVC. This is a single Get, replacing a 60s per-CR watch against the API
 	// server.
@@ -132,8 +136,8 @@ func (r *ReconcileCnsRegisterVolume) submitCreateVolume(ctx context.Context,
 	// CreateVolume calls. Now that the workers are released, that ceiling has
 	// to be explicit or a burst would hit CNS far harder than it does today.
 	if !r.taskTracker.tryAcquireSlot(cr) {
-		log.Infof("CnsRegisterVolume %s/%s is waiting for a CNS task slot (%d in flight)",
-			instance.Namespace, instance.Name, r.taskTracker.inFlight())
+		log.Infof("CnsRegisterVolume %s/%s is waiting for a CNS task slot (%d in flight, %d waiting)",
+			instance.Namespace, instance.Name, r.taskTracker.inFlight(), r.taskTracker.waiting())
 		setInstanceConditions(ctx, r, instance, falseCondition(cnsregistervolumev1alpha1.ConditionCnsVolumeRegistered,
 			cnsregistervolumev1alpha1.ReasonWaitingForTaskSlot, "Waiting for a CNS task slot"))
 		return nil, &reconcile.Result{RequeueAfter: cnsSlotRetryInterval}, nil
@@ -220,14 +224,17 @@ func (r *ReconcileCnsRegisterVolume) pollCreateVolume(ctx context.Context,
 	taskID := instance.Status.CnsTaskID
 	taskMoRef := vim25types.ManagedObjectReference{Type: "Task", Value: taskID}
 
+	outcome, done := r.taskTracker.outcome(taskID)
 	// A CR resuming after a syncer restart holds a task ID but has no
 	// subscription, because the listview is in-process and starts empty. Its
 	// slot is normally accounted for by restoreTaskAccounting before anything
 	// new is admitted; this covers a CR that reaches here first. The task is
-	// monitored whether or not a slot is free, since it is already running.
-	r.taskTracker.tryAcquireSlot(cr)
-
-	outcome, done := r.taskTracker.outcome(taskID)
+	// monitored whether or not a slot is free, since it may be running. A
+	// Succeeded or Failed outcome needs no slot: consuming it must not take
+	// capacity back from the CRs in line.
+	if !done || !outcome.terminal() {
+		r.taskTracker.accountRunningTask(cr)
+	}
 	if !done {
 		if r.taskTracker.isRetiring(taskID) {
 			// The previous subscription's result was consumed but its removal

@@ -74,12 +74,19 @@ import (
 const (
 	workerThreadsEnvVar     = "WORKER_THREADS_REGISTER_VOLUME"
 	defaultMaxWorkerThreads = 40
-	// maxInFlightCnsTasksEnvVar caps concurrent CNS CreateVolume tasks. Before
-	// the task wait was moved off the reconciler worker, the worker pool itself
-	// capped this at defaultMaxWorkerThreads; this replaces that ceiling
-	// explicitly so vCenter sees no more concurrency than it does today.
+	// maxInFlightCnsTasksEnvVar caps concurrent CNS CreateVolume tasks from
+	// this controller.
+	//
+	// It is not what protects vCenter. CNS admits every create against its own
+	// limits -- at most 4000 queued or running CNS tasks per vCenter and 10 per
+	// disk path, executed by at most 128 CNS worker threads -- and rejects
+	// anything beyond them at once with a CnsFault, which the submit path
+	// retries. The cap bounds what this process keeps in flight: one watcher
+	// goroutine and one listview subscription per task. It started at 40 to
+	// match the reconcile worker pool that used to bound it implicitly, and at
+	// 40 it became the bottleneck of a 1000-volume burst while vCenter idled.
 	maxInFlightCnsTasksEnvVar  = "MAX_INFLIGHT_CNS_TASKS_REGISTER_VOLUME"
-	defaultMaxInFlightCnsTasks = 40
+	defaultMaxInFlightCnsTasks = 500
 	staticPvNamePrefix         = "static-pv-"
 	// Labels added to PVs created by CnsRegisterVolume for identification and direct lookup
 	labelCnsRegisterVolumeCreatedBy      = "cns.vmware.com/created-by"
@@ -446,6 +453,21 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		}
 	}
 
+	// A CR that has already passed validation and is only waiting for a CNS
+	// task slot gets nothing from re-running validation, the vCenter lookups and
+	// the create spec until a slot is free for it; it is woken when one is. This
+	// only ever refuses: admission itself still happens at the submit, after
+	// the full pipeline. SnapService restores are left to the full path, which
+	// orders them through the restore reservation first.
+	if r.taskTracker != nil && instance.Status.CnsTaskID == "" && instance.Status.CnsVolumeID == "" &&
+		specValidatedForGeneration(instance) && r.taskTracker.isSeeded() &&
+		!r.isSnapServiceRestore(ctx, instance) && r.taskTracker.mustWait(request.NamespacedName) {
+		log.Debugf("CnsRegisterVolume %s/%s is still waiting for a CNS task slot", instance.Namespace, instance.Name)
+		setInstanceConditions(ctx, r, instance, falseCondition(cnsregistervolumev1alpha1.ConditionCnsVolumeRegistered,
+			cnsregistervolumev1alpha1.ReasonWaitingForTaskSlot, "Waiting for a CNS task slot"))
+		return reconcile.Result{RequeueAfter: cnsSlotRetryInterval}, nil
+	}
+
 	log.Infof("Reconciling CnsRegisterVolume with instance: %q from namespace: %q. timeout %q seconds",
 		instance.Name, request.Namespace, timeout)
 
@@ -593,8 +615,9 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	setInstanceConditions(ctx, r, instance, trueCondition(cnsregistervolumev1alpha1.ConditionSpecValidated,
 		cnsregistervolumev1alpha1.ReasonValidated, "CnsRegisterVolume spec is valid"))
 
-	log.Infof("Creating CNS volume: %+v for CnsRegisterVolume request with name: %q on namespace: %q",
-		instance, instance.Name, instance.Namespace)
+	log.Infof("Creating CNS volume for CnsRegisterVolume request with name: %q on namespace: %q",
+		instance.Name, instance.Namespace)
+	log.Debugf("CnsRegisterVolume instance: %+v", instance)
 	// Submit the CNS task and return, or pick up the result of a task submitted
 	// by an earlier pass. Either way this does not block on CNS, so the worker
 	// is free to start another CnsRegisterVolume while this one's task runs.
@@ -2073,6 +2096,14 @@ func falseCondition(conditionType, reason, message string) *metav1.Condition {
 		Reason:  reason,
 		Message: message,
 	}
+}
+
+// specValidatedForGeneration reports whether SpecValidated is True for the
+// current spec. A condition left over from an earlier generation does not count:
+// the new spec has not been checked yet.
+func specValidatedForGeneration(instance *cnsregistervolumev1alpha1.CnsRegisterVolume) bool {
+	c := conditions.Get(instance, cnsregistervolumev1alpha1.ConditionSpecValidated)
+	return c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == instance.Generation
 }
 
 // setInstanceCnsTaskID persists the in-flight CNS task reference, or clears it

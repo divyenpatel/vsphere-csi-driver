@@ -18,7 +18,9 @@ package cnsregistervolume
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -39,6 +41,13 @@ import (
 // watcher publishes an Unknown outcome, which makes the reconciler read the
 // task directly and subscribe again if it is still running.
 const cnsTaskWatchTimeout = volumes.VolumeOperationTimeoutInSeconds * time.Second
+
+// slotWakeClaimWindow is how long a waiter woken for a free slot keeps its
+// place in line. A woken CR normally claims the slot within its next reconcile;
+// one that does not -- its pass failed before the submit, or the wake-up was
+// dropped -- must not hold the line, so after this it stops counting as ahead
+// of the CRs behind it until it asks again.
+const slotWakeClaimWindow = 10 * time.Second
 
 // cnsTaskTracker watches in-flight CNS CreateVolume tasks on behalf of the
 // reconciler.
@@ -91,8 +100,18 @@ type cnsTaskTracker struct {
 	submittedAt map[string]time.Time
 	// slots maps a CR to the task MoRef it currently holds a capacity slot
 	// for. Keyed by CR rather than by task so that a CR which loses its task
-	// reference cannot leak a slot forever.
+	// reference cannot leak a slot forever. An entry stays until the CR has
+	// consumed its task's result, because it is also how a CR finds a task
+	// whose reference it has not yet persisted; but once the task has published
+	// a Succeeded or Failed outcome the entry no longer counts against the cap
+	// (see activeLocked).
 	slots map[apitypes.NamespacedName]string
+	// waiters are the CRs refused a slot, admitted in the order they were first
+	// refused. Without an order a freed slot went to whichever CR's retry timer
+	// fired next, so a CR could be passed over for minutes. A CR that retries
+	// after a failed task joins at the back like any other: there is no priority
+	// for retries.
+	waiters map[apitypes.NamespacedName]*slotWaiter
 	// seeded records that slots has been rebuilt from the tasks persisted on
 	// CRs. slots starts empty in a new process while those tasks are still
 	// running on CNS, so nothing new may be admitted before this is done.
@@ -104,11 +123,22 @@ type cnsTaskTracker struct {
 	maxInFlight int
 	// watchTimeout is cnsTaskWatchTimeout; a field so tests can shorten it.
 	watchTimeout time.Duration
+	// claimWindow is slotWakeClaimWindow; a field so tests can shorten it.
+	claimWindow time.Duration
+	// waiterSeq orders waiters refused at the same instant.
+	waiterSeq uint64
 
 	listView volumes.ListViewIf
 	vc       *cnsvsphere.VirtualCenter
 	// events wakes a CR's reconcile when its task completes.
 	events chan event.GenericEvent
+}
+
+// slotWaiter is a CR waiting for an in-flight slot.
+type slotWaiter struct {
+	since   time.Time
+	seq     uint64
+	wokenAt time.Time
 }
 
 // cnsTaskOutcome is a decoded, terminal CreateVolume result.
@@ -117,6 +147,12 @@ type cnsTaskOutcome struct {
 	volInfo   *volumes.CnsVolumeInfo
 	faultType string
 	err       error
+}
+
+// terminal reports whether the task is finished on CNS, so its slot is no
+// longer load on vCenter. Unknown is not terminal: the task may still be running.
+func (o *cnsTaskOutcome) terminal() bool {
+	return o.state == volumes.CreateVolumeTaskSucceeded || o.state == volumes.CreateVolumeTaskFailed
 }
 
 // newCnsTaskTracker builds a tracker. events must be the same channel the
@@ -129,8 +165,10 @@ func newCnsTaskTracker(listView volumes.ListViewIf, vc *cnsvsphere.VirtualCenter
 		retiring:     make(map[string]bool),
 		submittedAt:  make(map[string]time.Time),
 		slots:        make(map[apitypes.NamespacedName]string),
+		waiters:      make(map[apitypes.NamespacedName]*slotWaiter),
 		maxInFlight:  maxInFlight,
 		watchTimeout: cnsTaskWatchTimeout,
+		claimWindow:  slotWakeClaimWindow,
 		listView:     listView,
 		vc:           vc,
 		events:       events,
@@ -140,18 +178,155 @@ func newCnsTaskTracker(listView volumes.ListViewIf, vc *cnsvsphere.VirtualCenter
 // tryAcquireSlot reserves one of the in-flight CNS task slots for a CR.
 //
 // A CR that already holds a slot gets it back rather than taking a second one,
-// so a repeated reconcile of the same CR cannot consume the cap.
+// so a repeated reconcile of the same CR cannot consume the cap. Slots are
+// granted in the order CRs were first refused: a CR is admitted only if fewer
+// waiters are ahead of it than there are free slots. A refused CR is put in
+// line and woken by the next release; it does not have to poll.
 func (t *cnsTaskTracker) tryAcquireSlot(cr apitypes.NamespacedName) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, held := t.slots[cr]; held {
+		delete(t.waiters, cr)
 		return true
 	}
-	if len(t.slots) >= t.maxInFlight {
+	if !t.admissibleLocked(cr) {
 		return false
 	}
+	delete(t.waiters, cr)
 	t.slots[cr] = ""
 	return true
+}
+
+// mustWait reports whether a CR that holds no slot would be refused one right
+// now, putting it in line if so. It reserves nothing, so a reconcile can use it
+// to skip the work that precedes a submission it could not make anyway.
+func (t *cnsTaskTracker) mustWait(cr apitypes.NamespacedName) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, held := t.slots[cr]; held {
+		return false
+	}
+	return !t.admissibleLocked(cr)
+}
+
+// admissibleLocked decides admission for a CR without a slot, and records the
+// CR as a waiter when it is refused. t.mu must be held.
+func (t *cnsTaskTracker) admissibleLocked(cr apitypes.NamespacedName) bool {
+	free := t.maxInFlight - t.activeLocked()
+	if free > 0 && t.waitersAheadLocked(cr) < free {
+		return true
+	}
+	if _, waiting := t.waiters[cr]; !waiting {
+		t.waiterSeq++
+		t.waiters[cr] = &slotWaiter{since: time.Now(), seq: t.waiterSeq}
+	}
+	return false
+}
+
+// waitersAheadLocked counts the waiters in line before cr. A CR not yet in line
+// is behind all of them. A waiter that was woken more than claimWindow ago
+// without claiming is skipped. t.mu must be held.
+func (t *cnsTaskTracker) waitersAheadLocked(cr apitypes.NamespacedName) int {
+	me, inLine := t.waiters[cr]
+	now := time.Now()
+	ahead := 0
+	for other, w := range t.waiters {
+		if other == cr {
+			continue
+		}
+		if !w.wokenAt.IsZero() && now.Sub(w.wokenAt) > t.claimWindow {
+			continue
+		}
+		if !inLine || w.since.Before(me.since) || (w.since.Equal(me.since) && w.seq < me.seq) {
+			ahead++
+		}
+	}
+	return ahead
+}
+
+// activeLocked counts the slots whose task may still be running on CNS. A slot
+// whose task has published a Succeeded or Failed outcome is not counted: vCenter
+// is done with it, even if the CR has not consumed the result yet. Releasing
+// the capacity at that point, rather than when the CR's next reconcile runs,
+// keeps the cap a bound on vCenter load instead of on reconcile queue latency.
+// t.mu must be held.
+func (t *cnsTaskTracker) activeLocked() int {
+	n := 0
+	for _, taskID := range t.slots {
+		if taskID != "" {
+			if out, ok := t.results[taskID]; ok && out.terminal() {
+				continue
+			}
+		}
+		n++
+	}
+	return n
+}
+
+// accountRunningTask takes a slot for a CR whose task is already running, for
+// example after a restart, if one is free. The task is monitored either way;
+// this is accounting only, so it neither waits in line nor jumps it.
+func (t *cnsTaskTracker) accountRunningTask(cr apitypes.NamespacedName) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, held := t.slots[cr]; held {
+		return
+	}
+	if t.activeLocked() < t.maxInFlight {
+		delete(t.waiters, cr)
+		t.slots[cr] = ""
+	}
+}
+
+// wakeWaitersLocked picks the waiters to wake for the slots now free, oldest
+// first, skipping any woken within claimWindow, and marks them woken. The caller
+// delivers the wake-ups after releasing t.mu. t.mu must be held.
+func (t *cnsTaskTracker) wakeWaitersLocked() []apitypes.NamespacedName {
+	free := t.maxInFlight - t.activeLocked()
+	if free <= 0 || len(t.waiters) == 0 {
+		return nil
+	}
+	now := time.Now()
+	type entry struct {
+		cr apitypes.NamespacedName
+		w  *slotWaiter
+	}
+	var candidates []entry
+	for cr, w := range t.waiters {
+		if !w.wokenAt.IsZero() && now.Sub(w.wokenAt) <= t.claimWindow {
+			// Already woken for a slot and still within its claim window: it
+			// holds one of the free slots in line.
+			free--
+			continue
+		}
+		candidates = append(candidates, entry{cr, w})
+	}
+	if free <= 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := candidates[i].w, candidates[j].w
+		if !a.since.Equal(b.since) {
+			return a.since.Before(b.since)
+		}
+		return a.seq < b.seq
+	})
+	if len(candidates) > free {
+		candidates = candidates[:free]
+	}
+	woken := make([]apitypes.NamespacedName, 0, len(candidates))
+	for _, c := range candidates {
+		c.w.wokenAt = now
+		woken = append(woken, c.cr)
+	}
+	return woken
+}
+
+// wakeAll delivers wake-ups chosen by wakeWaitersLocked.
+func (t *cnsTaskTracker) wakeAll(crs []apitypes.NamespacedName) {
+	for _, cr := range crs {
+		t.wake(cr)
+	}
 }
 
 // isSeeded reports whether the slots of tasks submitted by an earlier process
@@ -181,18 +356,29 @@ func (t *cnsTaskTracker) seed(holders []apitypes.NamespacedName) {
 	t.seeded = true
 }
 
-// releaseSlot returns a CR's slot to the pool. Safe to call when none is held.
+// releaseSlot returns a CR's slot to the pool and wakes the next waiter. Safe
+// to call when none is held.
 func (t *cnsTaskTracker) releaseSlot(cr apitypes.NamespacedName) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	delete(t.slots, cr)
+	woken := t.wakeWaitersLocked()
+	t.mu.Unlock()
+	t.wakeAll(woken)
 }
 
-// inFlight reports how many slots are currently taken.
+// inFlight reports how many slots count against the cap: tasks that may still
+// be running on CNS, plus slots reserved for a submission in progress.
 func (t *cnsTaskTracker) inFlight() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.slots)
+	return t.activeLocked()
+}
+
+// waiting reports how many CRs are in line for a slot.
+func (t *cnsTaskTracker) waiting() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.waiters)
 }
 
 // watch registers a submitted task with the listview and starts the goroutine
@@ -276,6 +462,17 @@ func (t *cnsTaskTracker) awaitResult(cr apitypes.NamespacedName,
 	decodeCtx, cancel := context.WithTimeout(ctx, volumes.VolumeOperationTimeoutInSeconds*time.Second)
 	state, volInfo, faultType, err := volumes.DecodeCreateVolumeTaskResult(decodeCtx, vc, result, volumeName)
 	cancel()
+	// The decoder reports a missing TaskInfo as Unknown because the listview
+	// sends one both when vCenter says the task failed and when the listview
+	// itself lost its session. The two are distinguishable: only a task that
+	// vCenter reported in the error state carries ErrTaskFailed. Treating that
+	// as Failed records the failure on the CR and retries it promptly, instead
+	// of re-reading a task that CNS may already have cleaned up -- which ended
+	// as a silent resubmission with no event and no backoff.
+	if state == volumes.CreateVolumeTaskUnknown && !expired && result.TaskInfo == nil &&
+		errors.Is(result.Err, volumes.ErrTaskFailed) {
+		state, err = volumes.CreateVolumeTaskFailed, result.Err
+	}
 	log.Infof("CNS CreateVolume task %q for CnsRegisterVolume %s/%s completed with state %q",
 		taskMoRef.Value, cr.Namespace, cr.Name, state)
 
@@ -295,11 +492,19 @@ func (t *cnsTaskTracker) awaitResult(cr apitypes.NamespacedName,
 	}
 	// A CR whose slot was released while the task ran (it was deleted, or a
 	// completed checkpoint was observed) will never consume the result.
+	var woken []apitypes.NamespacedName
 	if t.slots[cr] == taskMoRef.Value {
-		t.results[taskMoRef.Value] = &cnsTaskOutcome{state: state, volInfo: volInfo, faultType: faultType, err: err}
+		out := &cnsTaskOutcome{state: state, volInfo: volInfo, faultType: faultType, err: err}
+		t.results[taskMoRef.Value] = out
+		if out.terminal() {
+			// The slot stops counting against the cap now (activeLocked);
+			// hand it to the next CR in line.
+			woken = t.wakeWaitersLocked()
+		}
 	}
 	t.mu.Unlock()
 	t.wake(cr)
+	t.wakeAll(woken)
 
 	removeErr := t.listView.RemoveTask(ctx, taskMoRef)
 	if removeErr != nil {
@@ -377,12 +582,15 @@ func (t *cnsTaskTracker) isRetiring(taskID string) bool {
 // task, which covers status writes that committed but whose response was lost.
 func (t *cnsTaskTracker) releaseCR(cr apitypes.NamespacedName) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	delete(t.waiters, cr)
 	if taskID, held := t.slots[cr]; held {
 		delete(t.results, taskID)
 		delete(t.slots, cr)
 		t.dropTaskLocked(taskID)
 	}
+	woken := t.wakeWaitersLocked()
+	t.mu.Unlock()
+	t.wakeAll(woken)
 }
 
 // dropTaskLocked clears what is kept for a task after its watcher has
@@ -402,10 +610,12 @@ func (t *cnsTaskTracker) dropTaskLocked(taskID string) {
 // reconciler has acted on the outcome.
 func (t *cnsTaskTracker) forget(cr apitypes.NamespacedName, taskID string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	delete(t.results, taskID)
 	delete(t.slots, cr)
 	t.dropTaskLocked(taskID)
+	woken := t.wakeWaitersLocked()
+	t.mu.Unlock()
+	t.wakeAll(woken)
 }
 
 // forgetResult drops a consumed outcome but keeps the CR's capacity slot.
