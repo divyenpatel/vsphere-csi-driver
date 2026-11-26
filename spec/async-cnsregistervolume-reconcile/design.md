@@ -8,8 +8,10 @@ preserve [CNAS-12485](../CNAS-12485/spec.md), especially §6.2–§6.9 and the D
 The async changes affect scheduling and recovery, not the source or ownership of snapshot charges.
 
 A `CnsRegisterVolume` (CRV) asks the Supervisor to import an existing disk (by `volumeID` or
-`diskURLPath`), create the PV and PVC for it, and report `status.registered=true`. VM Operator
-creates one CRV per disk when it imports or restores a VM, and VM Service waits 120s for each.
+`diskURLPath`), create the PV and PVC for it, and report `status.registered=true`. One CRV is
+created per disk when a VM is imported, restored or registered, and the caller waits a bounded time
+for each: VM Service waits 120s on import, and wcpsvc waits 5 minutes per VM when it registers VMs
+recovered by SRM.
 
 ## 1. The problem
 
@@ -54,8 +56,34 @@ sequenceDiagram
 5. **Not diagnosable.** Operators see only `registered=false` and a free-text `error`. "Queued",
    "CNS task running" and "waiting for bind" look identical.
 
-Because VM Service waits 120s for each CRV, a queue wait longer than that makes registrations time
-out even though the reconcile itself takes only seconds of real work.
+Because the caller waits a bounded time for each CRV, a queue wait longer than that makes
+registrations time out even though the reconcile itself takes only seconds of real work.
+
+### 1.3 What the first async version still left in a burst
+
+Moving the waits off the worker (section 2) removed the queue wait, but a 1000-volume SRM recovery
+(500 VMs, 2 disks each) still lost 259 VMs to wcpsvc's 5-minute wait. Every CRV was validated within
+51s, then waited a median 271s before its CNS create reached vCenter, while vCenter ran 0–5 creates at
+a time and finished each in about 1.3s. Three things combined:
+
+1. **The listview lock was saturated.** Every CNS task wait in the syncer -- CnsRegisterVolume
+   creates, `QueryVolumeAsync`, batch attach, `UpdateVolumeMetadata` -- goes through one listview.
+   `AddTask` and `RemoveTask` each held its lock across two vCenter round trips, a session check and
+   `ListView.modify`, so the whole process registered and removed tasks one at a time: about 1000
+   calls a minute, with the lock idle 1–4s per minute. vCenter answered each call in under 10ms.
+2. **A slot was freed only when the CRV consumed its result.** A CRV waited 10–30s in the lock's line
+   to learn a result vCenter already had, and kept its in-flight slot meanwhile. At 40 slots that
+   held submissions to about 2 a second.
+3. **Waiting CRVs polled.** About 900 CRVs retried for a slot every 5s, each re-running validation,
+   vCenter lookups and the create spec, crowding the work queue that slot holders needed to finish.
+   A freed slot went to whichever CRV's timer fired next, so some waited minutes.
+
+A secondary, environment-specific effect: 276 of 1276 disk registrations were rejected by ESXi
+hostd with `InvalidState` because all recovered disks shared two `ddb.uuid` values and hostd allows
+one FCD operation per `ddb.uuid` per host. CSI cannot see `ddb.uuid`; it retries such failures.
+Before this change those failures also left no event on the CRV (see 3.4).
+
+Sections 2.3, 3.4, 3.5 and 3.8 describe the changes that address this.
 
 ## 2. How the problem is solved
 
@@ -107,12 +135,19 @@ Two listview properties shape the tracker:
 - Its send is non-blocking, so a full channel silently discards the result. Each task gets its own
   channel with capacity 1.
 
+Registration and removal must not be serialized across the whole process. The listview is shared by
+every CNS operation in the CSI process, so a lock held across each vCenter round trip becomes the
+throughput ceiling for all of them under a burst. Registration and removal therefore hold the
+listview lock shared and run concurrently; only the view lifecycle holds it exclusively (3.8).
+
 ### 2.3 Supporting decisions
 
 | Decision | Why |
 |---|---|
-| **Explicit in-flight cap**, `MAX_INFLIGHT_CNS_TASKS_REGISTER_VOLUME` (default 40) | The 40 blocking workers were an implicit ceiling on concurrent `CreateVolume` calls into vCenter. Releasing them removes it, so it is replaced explicitly or a burst would hit CNS harder than today. |
-| **Distinct `Unknown` task state** | A nil listview `TaskInfo` can mean a terminal task error or a lost session. Read the task directly to distinguish them. Inconclusive reads retain the task ID and slot; a confirmed missing task follows the CNS lookup and recovery procedure in 3.4. |
+| **In-flight cap**, `MAX_INFLIGHT_CNS_TASKS_REGISTER_VOLUME` (default 500) | Bounds what the syncer keeps in flight: one watcher goroutine and one listview subscription per task. It does not protect vCenter: CNS admits every create against its own limits (4000 queued or running tasks per vCenter, 10 per disk path, at most 128 CNS worker threads) and rejects the excess at once with a `CnsFault`, which the submit path retries. A default of 40, matching the old worker pool, became the bottleneck of a burst while vCenter idled (1.3). |
+| **Capacity returns when CNS finishes** | A slot stops counting against the cap as soon as its task publishes `Succeeded` or `Failed`, not when the CRV's next reconcile consumes the result. The cap then bounds vCenter-side work instead of reconcile queue latency. `Unknown` keeps the slot. |
+| **Ordered admission, woken not polled** | CRVs refused a slot wait in line in the order they were first refused and are woken when a slot frees, with a 30s safety requeue. A newcomer cannot jump the line, and a retry after a failed task rejoins at the back: there is no priority for retries. A validated CRV that would only be refused again skips the pre-CNS work. |
+| **Distinct `Unknown` task state** | A nil listview `TaskInfo` can mean a terminal task error or a lost session. The listview tells them apart by sentinel: `ErrTaskFailed` only for a task vCenter reported in the error state, `ErrTaskMonitoring` for a lost session. `ErrTaskFailed` is recorded as `Failed`; anything else is `Unknown` and the task is read directly. Inconclusive reads retain the task ID and slot; a confirmed missing task follows the CNS lookup and recovery procedure in 3.4. |
 | **Settle submitted work before admission** | A changed StorageClass or policy must not prevent a completed CNS task from being checkpointed and its slot released. Admission is still checked before PV or PVC creation. |
 | **Deletion waits for an in-flight task** | Dropping the finalizer while a task runs would delete the CRV and orphan the volume the task creates. The finalizer is held until the task settles, then any volume it created is cleaned up. |
 | **Deletion after bind does not undo the registration** | Once `PvcBound=True`, the volume, PV and PVC belong to the workload even if `registered` is still false. Unregistering it would pull a disk from a live VM and a bound PVC, and a CNS fault doing so used to requeue forever and leave the namespace `Terminating`. The finalizer is released; PVC and PV deletion own the volume. See 3.6. |
@@ -247,7 +282,7 @@ The reasons are the diagnostic payload: they are what used to be invisible.
 | | False | `RestoreMetadataFailed` | Retry the complete handover; do not publish registration success. |
 | | True | `RestoreMetadataConfigured` / `NotRequired` | Handover completed or is not applicable. |
 | `CnsVolumeRegistered` | True | `Registered` | The CNS volume exists. |
-| | False | `WaitingForTaskSlot` | The in-flight cap is full; retrying every 5s. Nothing has been sent to CNS. |
+| | False | `WaitingForTaskSlot` | No in-flight slot is free for this CRV in its turn. It waits in line and is woken when one frees (30s safety requeue). Nothing has been sent to CNS. |
 | | False | `CnsTaskRunning` | The task is submitted and running. No worker is held. |
 | | False | `CnsTaskFailed` | CNS reported a terminal fault. **Retried**, not terminal. |
 | | False | `CnsTaskStateUnknown` | The task's state could not be determined. The task ID and slot are kept while its state is resolved. |
@@ -331,7 +366,8 @@ message that embeds a changing value — a retry count, an elapsed time, a times
 events, not in a condition message.
 
 Reading a stuck CR: `CnsVolumeRegistered=False, reason=WaitingForTaskSlot` for a long time means it
-is queued behind the cap; `reason=CnsTaskRunning` means CNS is slow; `PvcBound=False,
+is queued behind the cap (the syncer logs `N in flight, M waiting`); `reason=CnsTaskRunning` means
+CNS is slow; `PvcBound=False,
 reason=WaitingForBind` means the PVC is not binding.
 
 #### Consumer rules
@@ -426,8 +462,10 @@ The CRD change is additive and optional, and nothing outside CSI writes this sta
 - **VM Operator e2e** waits on `status.registered`, which is written at the same points as before.
 - `registered` and `error` keep their exact meaning. The additions are `conditions`,
   `cnsTaskID` and `cnsVolumeID`, all optional.
-- No change to the `volumes.Manager` interface or the listview, and the syncer's volume manager
-  still gets no operation store. The new volume-package code is additive.
+- No change to the `volumes.Manager` or `ListViewIf` interfaces, and the syncer's volume manager
+  still gets no operation store. The listview's internal locking changes (3.8): task registration
+  and removal no longer serialize, for every CNS operation in the process. Caller-visible results
+  and errors are unchanged.
 
 ## 3. How it is implemented
 
@@ -436,7 +474,8 @@ The CRD change is additive and optional, and nothing outside CSI writes this sta
 | Component | File | Responsibility |
 |---|---|---|
 | `SubmitCreateVolumeTask`, `GetCreateVolumeTaskResult`, `DecodeCreateVolumeTaskResult`, `TaskListView` | `pkg/common/cns-lib/volume/async_create.go` | Submit without waiting; one-shot task read; decode a listview result. Decoding delegates to the same unexported helpers `Manager.CreateVolume` uses, so both paths agree on what a response means, including `CnsAlreadyRegisteredFault` → success, which makes resubmission safe. |
-| `cnsTaskTracker` | `cnsregistervolume/tasktracker.go` | Per-task watcher goroutines, completed-outcome map, in-flight slot accounting, latency metric, wake-ups. |
+| `ListViewImpl` locking (`viewLock`) | `pkg/common/cns-lib/volume/listview.go` | Shared lock for task registration and removal, exclusive for the view lifecycle (3.8). |
+| `cnsTaskTracker` | `cnsregistervolume/tasktracker.go` | Per-task watcher goroutines, completed-outcome map, in-flight slot accounting, ordered waiters, latency metric, wake-ups. |
 | `submitOrPollCreateVolume` and helpers | `cnsregistervolume/asyncregister.go` | Submit-or-resume, outcome handling, direct-read fallback, `isPVCBoundNow`, delete with task in flight. |
 | `Reconcile`, `reconcileDelete`, status helpers | `cnsregistervolume_controller.go` | Condition publication, event source registration, finalizer handling. |
 | CRD and types | `pkg/apis/cnsoperator/cnsregistervolume/v1alpha1`, `config/cnsregistervolume_crd.yaml` | New status fields and printer columns. |
@@ -449,11 +488,13 @@ flowchart TD
     B -->|Yes| DEL["reconcileDelete (3.6)"]
     B -->|No| C{"registered?"}
     C -->|Yes| END0["Done"]
-    C -->|No| V["Add finalizer, validate spec<br/>mark SpecValidated"]
+    C -->|No| FP{"No cnsTaskID or cnsVolumeID,<br/>SpecValidated for this generation,<br/>and no slot free in turn?"}
+    FP -->|Yes| WQ["Stay in line, WaitingForTaskSlot<br/>(return, woken when a slot frees)"]
+    FP -->|No| V["Add finalizer, validate spec<br/>mark SpecValidated"]
     V --> R{"cnsVolumeID set?"}
     R -->|Yes| ACC
     R -->|No| S{"cnsTaskID set?"}
-    S -->|No| SUB["Take slot, submit task,<br/>reserve restore if applicable,<br/>persist cnsTaskID, watch<br/>(return, worker free)"]
+    S -->|No| SUB["Take slot in turn, submit task,<br/>reserve restore if applicable,<br/>persist cnsTaskID, watch<br/>(return, worker free)"]
     S -->|Yes| POLL["Resolve task (3.4)"]
     POLL -->|succeeded| ACC["mark CnsVolumeRegistered<br/>check datastore and policy<br/>against the returned volume"]
     POLL -->|"running / unknown / failed"| WAIT["Return and wait"]
@@ -473,7 +514,8 @@ Each box that says "return" releases the worker. Requeue intervals:
 | Constant | Value | Purpose |
 |---|---|---|
 | `cnsTaskSafetyRequeue` | 10s | Backstop if a completion wake-up is lost. Completion normally arrives as a push, so this is not a poll. |
-| `cnsSlotRetryInterval` | 5s | Wait before retrying for an in-flight slot. |
+| `cnsSlotRetryInterval` | 30s | Safety requeue of a CRV waiting for a slot. It is woken when a slot is free for it, so this only bounds a lost wake-up. It was a 5s poll, which filled the work queue in a burst. |
+| `slotWakeClaimWindow` | 10s | How long a woken waiter keeps its place before the CRVs behind it may pass. |
 | `pvcBindPollInterval` | 2s | Re-check an unbound PVC with one `Get`. |
 | `vmDeleteProtectionRetryInterval` | 5s | Retry flag configuration independently of the general exponential backoff. |
 | `vmDeleteProtectionClearTimeout` | 30s | Bound one flag-configuration attempt, including its VM lookup and PVC annotation write. |
@@ -607,6 +649,7 @@ flowchart LR
     end
     subgraph TR["cnsTaskTracker, every map guarded by mu"]
         SL["slots<br/>CRV to task ID<br/>empty ID means reserved"]
+        WT["waiters<br/>CRV to place in line"]
         WA["watching and retiring<br/>task ID to flag"]
         RS["results<br/>task ID to decoded outcome"]
         SA["submittedAt<br/>task ID to submit time"]
@@ -616,6 +659,8 @@ flowchart LR
     EV["taskEvents channel<br/>buffer of twice the cap"]
 
     R -->|"tryAcquireSlot, releaseSlot,<br/>forget, releaseCR"| SL
+    R -->|"tryAcquireSlot, mustWait,<br/>releaseCR"| WT
+    G -->|"terminal outcome frees capacity,<br/>wake next waiters"| WT
     R -->|"watch sets watching;<br/>isWatching, isRetiring"| WA
     R -->|"AddTask with a capacity-1 channel"| LV
     R -->|"outcome lookup"| RS
@@ -630,10 +675,11 @@ flowchart LR
 
 | Map | Key | Written by | Purpose |
 |---|---|---|---|
-| `slots` | CRV | `seed`, `tryAcquireSlot`, `watch`, submit, `releaseSlot`, `forget`, `releaseCR` | Capacity accounting, see 3.5. Also holds a submitted task ID whose `cnsTaskID` write failed, so the next pass persists it instead of submitting again. Before the first submission of a process, `seed` takes a slot for every CRV that already records a `cnsTaskID` (one uncached list), so tasks from before a restart count against the cap before anything new is admitted. |
+| `slots` | CRV | `seed`, `tryAcquireSlot`, `accountRunningTask`, `watch`, submit, `releaseSlot`, `forget`, `releaseCR` | Capacity accounting, see 3.5. An entry lives until the CRV consumes its task's result, but stops counting against the cap once that result is `Succeeded` or `Failed`. Also holds a submitted task ID whose `cnsTaskID` write failed, so the next pass persists it instead of submitting again. Before the first submission of a process, `seed` takes a slot for every CRV that already records a `cnsTaskID` (one uncached list), so tasks from before a restart count against the cap before anything new is admitted. |
+| `waiters` | CRV | `tryAcquireSlot`, `mustWait`; removed on admission and by `releaseCR` | CRVs refused a slot, ordered by when they were first refused, with the time each was last woken. See 3.5. |
 | `watching` | task ID | `watch`, `awaitResult` | At most one subscription and goroutine per task. Cleared only after the subscription is removed. A watcher waits at most `cnsTaskWatchTimeout` (300s) for a push, then publishes `Unknown` so the task is read directly. |
 | `retiring` | task ID | `awaitResult`, `forget`, `releaseCR` | The result is published but removal is still running. A pass that needs the task again reads it directly instead of subscribing. If removal fails, the listview removes the subscription later by task reference, so the task stays retiring until the CRV is done with it. |
-| `results` | task ID | `awaitResult`; consumed by `forget` or `forgetResult` | Decoded terminal outcome waiting for the CRV's reconcile. A lookup here costs no vCenter call. |
+| `results` | task ID | `awaitResult`; consumed by `forget` or `forgetResult` | Decoded outcome waiting for the CRV's reconcile. A lookup here costs no vCenter call. Publishing a `Succeeded` or `Failed` outcome returns the slot's capacity and wakes the next waiters. |
 | `submittedAt` | task ID | `watch`, `awaitResult` | Start of the submit-to-completion latency span. |
 
 Lifecycle of one task inside the tracker:
@@ -652,8 +698,11 @@ The outcome stored on entering `Retiring` is independent of removal. The CRV's r
 it as soon as it is woken:
 
 - `Succeeded`: persist `cnsVolumeID` and clear `cnsTaskID` in one patch, then `forget` drops the
-  outcome and releases the slot.
-- `Failed`: clear `cnsTaskID`, then `forget`.
+  outcome and the CRV's slot entry. The capacity was already returned when the outcome was
+  published.
+- `Failed`: clear `cnsTaskID`, set `status.error` with a Warning event, then `forget`. A task vCenter
+  reported in the error state reaches here directly: the listview delivers it as `ErrTaskFailed`
+  with no `TaskInfo`, and the tracker records that as `Failed` rather than `Unknown`.
 - `Unknown`: `forgetResult` drops only the outcome and keeps the slot, then the task is read
   directly (3.4).
 
@@ -676,8 +725,8 @@ flowchart TD
     W -->|No| AT{"AddTask ok?"}
     AT -->|Yes| RQ
     AT -->|No| DIR["Read task directly<br/>from vCenter once"]
-    O -->|"Unknown result"| DIR
-    O -->|"Terminal result"| ST{"State"}
+    O -->|"Unknown result<br/>(lost session, expiry)"| DIR
+    O -->|"Terminal result,<br/>incl. ErrTaskFailed"| ST{"State"}
     DIR --> ST
     ST -->|Succeeded| OK["Persist cnsVolumeID, clear cnsTaskID,<br/>CnsVolumeRegistered=True"]
     ST -->|Failed| F["Clear cnsTaskID, set error,<br/>reason=CnsTaskFailed,<br/>resubmit after backoff"]
@@ -689,7 +738,11 @@ flowchart TD
 ```
 
 A consumed task result is never reused: a cleared or failed task ID leads to a new submit, not a
-retry of the old task. An unknown notification triggers a direct task read; an inconclusive read
+retry of the old task. A notification carrying `ErrTaskFailed` is already terminal and is handled
+as `Failed` without a direct read. Before that was done, such a failure was re-read as `Unknown`;
+the read could find the task already cleaned up by CNS, and the missing-task path below then
+resubmitted with no `status.error`, no event and no backoff, which hid every host-side failure of a
+burst. An unknown notification triggers a direct task read; an inconclusive read
 never authorizes resubmission. Once a direct read confirms that the task object is missing, a CNS
 query distinguishes an existing registration from one that needs a replacement task. A lookup by
 known volume ID is used when available; disk-URL-only registrations use the deterministic name.
@@ -706,21 +759,27 @@ prechecks still run before Kubernetes resources are created.
 #### How the cap is enforced
 
 `MAX_INFLIGHT_CNS_TASKS_REGISTER_VOLUME` is read once in `newReconciler` through
-`GetMaxWorkerThreads`. If it is unset, not an integer, or not positive, the default of 40 applies.
-It bounds `len(slots)`: the number of CRVs whose CNS work is admitted but not yet settled. That
-includes tasks running on CNS, results waiting to be consumed, tasks in an unknown state, and a
-submitted task whose `cnsTaskID` write failed. It is independent of
-`MaxConcurrentReconciles`, which bounds only the workers.
+`GetMaxWorkerThreads`. If it is unset, not an integer, or not positive, the default of 500 applies.
+It bounds the slots that may still be load on CNS: reserved slots for a submission in progress, tasks
+running on CNS, tasks in an unknown state, and a submitted task whose `cnsTaskID` write failed. A
+task whose `Succeeded` or `Failed` outcome is published no longer counts, even before the CRV
+consumes it. It is independent of `MaxConcurrentReconciles`, which bounds only the workers.
+
+The cap is not what protects vCenter. CNS admits every create against its own limits -- at most 4000
+queued or running CNS tasks per vCenter and 10 per disk path, executed by at most 128 CNS worker
+threads -- and rejects anything beyond them at once with a `CnsFault`, which the submit path treats
+as a submit error and retries with backoff. The cap bounds what the syncer keeps in flight: one
+watcher goroutine and one listview subscription per task.
 
 ```mermaid
 flowchart TD
     A["Pass with no cnsTaskID and no cnsVolumeID"] --> P{"Submitted task ID<br/>held in this CRV's slot?"}
     P -->|Yes| PERSIST["Persist that cnsTaskID and resolve it,<br/>no new submit"]
     P -->|No| CHK["Admission checks pass"]
-    CHK --> ACQ{"tryAcquireSlot under mu:<br/>CRV already holds a slot,<br/>or fewer slots than the cap?"}
-    ACQ -->|No| WAIT["CnsVolumeRegistered=False,<br/>reason=WaitingForTaskSlot,<br/>requeue 5s, nothing sent to CNS"]
+    CHK --> ACQ{"tryAcquireSlot under mu:<br/>CRV already holds a slot, or a slot is free<br/>and fewer waiters are ahead than free slots?"}
+    ACQ -->|No| WAIT["Join or keep place in line,<br/>CnsVolumeRegistered=False,<br/>reason=WaitingForTaskSlot,<br/>requeue 30s, nothing sent to CNS"]
     ACQ -->|"Yes, slot reserved"| RES{"Restore reservation<br/>and submit succeed?"}
-    RES -->|No| REL["releaseSlot, set error,<br/>retry with backoff"]
+    RES -->|No| REL["releaseSlot, wake next waiter,<br/>set error, retry with backoff"]
     RES -->|Yes| HOLD["Slot records the task ID,<br/>persist cnsTaskID, watch"]
 ```
 
@@ -730,17 +789,43 @@ in progress or running on CNS cannot exceed the cap. A repeat reconcile of the s
 existing slot back. Slots are keyed by CRV, so they cannot be counted twice for one registration
 and cannot be orphaned by losing a task reference.
 
+#### Ordered admission
+
+A CRV refused a slot is put in line, ordered by when it was first refused. A CRV is admitted only if
+fewer CRVs are ahead of it than there are free slots, so:
+
+- a newcomer seen for the first time queues behind everyone already waiting, even if a slot is
+  momentarily free;
+- a CRV whose task failed rejoins at the back when it asks again: there is no priority for retries;
+- whenever capacity is returned -- a terminal outcome is published, or `releaseSlot`, `forget` or
+  `releaseCR` frees a slot -- the oldest waiters, one per free slot, are woken through the same
+  `taskEvents` channel as task completions;
+- a woken waiter that does not claim its slot within `slotWakeClaimWindow` (10s) stops counting as
+  ahead of the CRVs behind it, so a CRV whose pass failed before the submit, or whose wake-up was
+  dropped, cannot hold up the line;
+- a deleted CRV leaves the line through `releaseCR`.
+
+Waiters do not poll. Their `RequeueAfter` of `cnsSlotRetryInterval` (30s) only bounds a lost
+wake-up. A waiting CRV whose `SpecValidated` is `True` for the current generation and that has no
+`cnsTaskID` or `cnsVolumeID` returns before validation, the vCenter lookups and the create spec when
+`mustWait` reports it would be refused. That check never reserves a slot; admission still happens
+at the submit, after the full pipeline. SnapService restores always take the full path, which orders
+them through the restore reservation first.
+
 Slot lifecycle for one CRV:
 
 ```mermaid
 stateDiagram-v2
     [*] --> Free
-    Free --> Free: cap full, WaitingForTaskSlot
+    Free --> Waiting: no slot free in turn, WaitingForTaskSlot
+    Waiting --> Waiting: woken but another CRV is ahead
+    Waiting --> Reserved: woken, tryAcquireSlot succeeds
     Free --> Reserved: tryAcquireSlot succeeds
     Reserved --> Free: restore reservation or submit fails
     Reserved --> Holding: submit accepted, slot records the task ID
     Holding --> Holding: running, unknown, or cnsTaskID write failed
-    Holding --> Free: success or failure consumed
+    Holding --> Finished: Succeeded or Failed published, capacity returned
+    Finished --> Free: outcome consumed
     Holding --> Free: missing task resolved by CNS lookup
     Holding --> Free: checkpoint read shows no task, or CRV registered or gone
     Free --> Holding: restart resumes a recorded cnsTaskID
@@ -748,22 +833,26 @@ stateDiagram-v2
 
 Every transition back to `Free` follows a durable settlement: the checkpoint was written, the
 failure was recorded, or the CRV no longer exists. That is why no failure path can keep a slot
-forever. The slot stays while the outcome is unresolved, so an unresolved task can neither be
-resubmitted nor have its capacity reused.
+forever. `Finished` keeps only the CRV's link to its task until the result is consumed; its capacity
+is already back in the pool. The slot stays counted while the outcome is unresolved, so an
+unresolved task can neither be resubmitted nor have its capacity reused.
 
-The cap can be exceeded in one case only. After a syncer restart, `pollCreateVolume` re-adopts each
-CRV that already has a `cnsTaskID` without checking the cap, because refusing would leave a running
-task unobserved. The excess is bounded by the tasks the previous process had in flight, itself at
-most the cap. It shrinks as those tasks settle, and new submissions wait meanwhile, because
-`tryAcquireSlot` refuses while `len(slots)` is at or above the cap.
+The cap can be exceeded in one case only. Before the first submission after a syncer restart, `seed`
+takes a slot for every CRV that already records a `cnsTaskID` without checking the cap, because those
+tasks are in flight whether or not they fit. The excess is bounded by the tasks the previous process
+had in flight, itself at most the cap. It shrinks as those tasks settle, and new submissions wait
+meanwhile. A CRV that resumes before seeding takes a slot through `accountRunningTask` only if one is
+free; its task is monitored either way.
 
 Slot accounting in `cnsTaskTracker`:
 
 - Slots are keyed by **CR**, not by task, so a CR that loses its task reference cannot leak one.
 - A CR that already holds a slot gets it back rather than a second one, so repeated reconciles do
   not consume the cap.
-- A slot is taken before submit and released on submit failure or when a success or failure is
-  consumed. It is **kept** across an Unknown outcome.
+- A slot is taken before submit and released on submit failure. Its capacity returns when a
+  `Succeeded` or `Failed` outcome is published; the entry itself is dropped when that outcome is
+  consumed. It is **kept**, and counted, across an `Unknown` outcome. Consuming a published outcome
+  never takes capacity back.
 - A reconcile that reads (uncached) a CRV with `cnsVolumeID` and no `cnsTaskID`, or one that is
   registered or gone, releases any slot and unconsumed result still held for it. This covers a
   checkpoint write that committed but whose response was lost. A result arriving for a CRV that no
@@ -772,9 +861,6 @@ Slot accounting in `cnsTaskTracker`:
   timeout when the caller has none, as does decoding a listview result. A submit timeout is not
   proof that CNS rejected the request; the retry relies on the deterministic name and
   `CnsAlreadyRegisteredFault`, as after a crash before `cnsTaskID` is persisted.
-- After a restart, CRVs that already hold a `cnsTaskID` resume and take a slot without being
-  refused, so the cap can be exceeded transiently, bounded by the number of tasks that were in
-  flight under the previous process (itself capped at 40).
 
 Failure and restart handling:
 
@@ -859,6 +945,38 @@ The condition and task-ID semantics are in 2.4 and 2.5; this is how the writes a
   before any controller starts. A unit test asserts the shipped CRD declares them, including the
   `x-kubernetes-list-type: map` keyed by `type` on `conditions`.
 
+
+### 3.8 Listview registration concurrency
+
+The listview (`pkg/common/cns-lib/volume/listview.go`) is the task-wait mechanism for every CNS
+operation in a CSI process: Create, Delete, Attach, Detach, Expand, snapshots, batch attach,
+`UpdateVolumeMetadata`, `QueryVolumeAsync`, CnsRegisterVolume and CnsUnregisterVolume, relocate.
+Its lock, `viewMu`, orders task registration and removal against replacement of the `ListView`
+object, so that no task is added to or removed from a view generation that is being torn down.
+
+`viewMu` is a `viewLock`: a context-aware reader/writer lock on a FIFO weighted semaphore of
+`viewLockSharedSlots` (32).
+
+| Holder | Mode | Why |
+|---|---|---|
+| `AddTask`, `RemoveTask`, `MarkTaskForDeletion`, `RemoveTasksMarkedForDeletion` | shared (1) | Independent per task; must not wait on each other's vCenter round trips. At most 32 talk to vCenter at once. |
+| `listenToTaskUpdates` view recreation, and the collector-failure path that reports errors to all pending tasks | exclusive (32) | Waits for in-flight registrations and admits none while pending or held, so the view is never replaced under a caller. The semaphore is FIFO, so a pending exclusive holder is not starved by new shared ones. |
+
+Every wait honors the caller's context, bounded by `listViewCallTimeout` (30s), and a caller whose
+context has already ended never waits.
+
+`AddTask` and `RemoveTask` no longer read `SessionManager.UserSession` before the `ListView` call.
+That check cost a second vCenter round trip under the lock on every registration and added
+nothing: an expired session fails the `ListView` call itself, which takes the existing path -- the
+view is marked not ready, the listener rebuilds it, and the caller gets the same
+`ErrListViewTaskAddition`. The listener's `WaitForUpdatesEx` loop also notices a dead session on its
+own. The task map is updated before `ListView.Add`, as before, so an immediate update finds its
+channel, and an `Add` failure still invalidates the view because its remote outcome is ambiguous.
+
+Effect on other operations: the time an operation waits to register or remove its task falls from
+up to `listViewCallTimeout` under a burst to about one round trip, and the 30s timeouts that
+returned `ErrTaskMonitoring` to callers become rare. View recreation keeps its guarantees, and an
+expired session is noticed one call later with the same error.
 
 ## 4. SnapService restore across async reconciles
 
